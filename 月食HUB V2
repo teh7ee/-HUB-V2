@@ -1,0 +1,3787 @@
+--[[
+  月食自瞄 by ECLIPSE
+  可靠：Silent Aim / FOV / 配置 / ESP / 本地视觉清图
+  半残：FastM1 / Fly / Speed / TP / AutoCombo / V4（吃服务器校验与远程名）
+  已移除虚假「无敌/秒杀」宣传；商店远程可能全废
+  /e hide | /e show | F12 | 月图标
+]]
+
+--[[
+  Silent Aim Stealth — WindUI-like sidebar (RJR Hub style)
+  拳法 ZXC | 刀 ZXC | 果实 ZXCVF | 枪 ZX
+  队友/盟友不进锁定列表
+  RShift 面板 | /e hide | /e show | F12
+]]
+
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local TextChatService = game:GetService("TextChatService")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+
+local ScriptAlive = true
+local HiddenMode = false
+local UILockedByHide = false
+local ConnBag = {}
+
+-- 针对/击杀记录
+_G.G_CombatLog = _G.G_CombatLog or { targeted = {}, killed = {} }
+local function CombatLogAdd(kind, name)
+    if not name or name == "" then return end
+    _G.G_CombatLog = _G.G_CombatLog or { targeted = {}, killed = {} }
+    local list = _G.G_CombatLog[kind]
+    if type(list) ~= "table" then list = {}; _G.G_CombatLog[kind] = list end
+    -- 去重移到最前
+    for i = #list, 1, -1 do
+        if list[i] == name then table.remove(list, i) end
+    end
+    table.insert(list, 1, name)
+    while #list > 30 do table.remove(list) end
+end
+
+local function track(conn)
+    if conn then table.insert(ConnBag, conn) end
+    return conn
+end
+
+-- ========== 全功能自定义按键 ==========
+_G.__GUIOpen = false
+_G.G_Keybinds = _G.G_Keybinds or {
+    ToggleGUI = "RightShift",
+    TP = "Q",
+    FastM1 = "None",
+    Speed = "None",
+    Dash = "None",
+    Fly = "None",
+    Noclip = "None",
+    InfJump = "None",
+    ForceV4 = "None",
+    ESP = "None",
+    AimSkill = "None",
+    AimM1 = "None",
+    ShowFOV = "None",
+    GunM1 = "None",
+    FruitM1 = "None",
+    AutoCombo = "None",
+    AutoDodge = "None",
+    NoStun = "None",
+}
+-- 超快速果实/枪械间隔
+_G.G_GunM1Delay = math.clamp(tonumber(_G.G_GunM1Delay) or 0.03, 0.01, 0.2)
+_G.G_FruitM1Delay = math.clamp(tonumber(_G.G_FruitM1Delay) or 0.03, 0.01, 0.2)
+
+local function KeyNameToEnum(name)
+    if not name or name == "" or name == "None" or name == "无" then return nil end
+    name = tostring(name)
+    local ok, kc = pcall(function() return Enum.KeyCode[name] end)
+    if ok and kc then return kc end
+    -- 别名
+    local aliases = {
+        ["左Shift"] = "LeftShift", ["右Shift"] = "RightShift",
+        ["左Ctrl"] = "LeftControl", ["右Ctrl"] = "RightControl",
+        ["空格"] = "Space",
+    }
+    if aliases[name] then
+        ok, kc = pcall(function() return Enum.KeyCode[aliases[name]] end)
+        if ok and kc then return kc end
+    end
+    return nil
+end
+
+local function ToggleFlag(flag, startFn, stopFn)
+    _G[flag] = not _G[flag]
+    local on = _G[flag]
+    if on and startFn then pcall(startFn) end
+    if not on and stopFn then pcall(stopFn) end
+    print("[月食] 热键切换", flag, on and "ON" or "OFF")
+end
+
+local KeybindActions = {}
+
+
+
+local function NotifyToggle(title, on)
+    local s = on and "已开启" or "已关闭"
+    print("[月食]", title, s)
+    pcall(function()
+        if WindUI and WindUI.Notify then
+            WindUI:Notify({ Title = title, Content = s, Duration = 1.5 })
+        end
+    end)
+end
+
+local function RegisterKeybindActions()
+    local function E(name)
+        local api = _G.__Eclipse
+        if type(api) == "table" and type(api[name]) == "function" then return api[name] end
+        local g = rawget(_G, name)
+        if type(g) == "function" then return g end
+        -- try current env
+        return nil
+    end
+    local function callE(name, ...)
+        local f = E(name)
+        if f then
+            local ok, err = pcall(f, ...)
+            if not ok then warn("[月食]", name, err) end
+            return ok
+        else
+            warn("[月食] 未就绪:", name)
+            return false
+        end
+    end
+    KeybindActions.ToggleGUI = function()
+        local W = (_G.__Eclipse and _G.__Eclipse.MainWindow) or MainWindow or Window
+        if W then
+            pcall(function()
+                if _G.__GUIOpen == false then
+                    if W.Open then W:Open() elseif W.SetVisible then W:SetVisible(true) end
+                    _G.__GUIOpen = true
+                else
+                    if W.Close then W:Close() elseif W.SetVisible then W:SetVisible(false) end
+                    _G.__GUIOpen = false
+                end
+            end)
+        end
+        NotifyToggle("GUI", _G.__GUIOpen)
+    end
+    KeybindActions.TP = function() callE("DoTPBehind"); NotifyToggle("TP", true) end
+    KeybindActions.FastM1 = function()
+        if _G.G_FastM1 then callE("StopFastM1") else callE("StartFastM1") end
+        NotifyToggle("快速普攻", _G.G_FastM1)
+    end
+    KeybindActions.Speed = function()
+        _G.G_translateAccel = not _G.G_translateAccel
+        if _G.G_translateAccel then callE("StartTranslateAccel"); callE("StartSpeedHB")
+        else callE("StopTranslateAccel"); callE("StopSpeedHB") end
+        NotifyToggle("速度", _G.G_translateAccel)
+    end
+    KeybindActions.Dash = function()
+        _G.G_DashLengthEnabled = not _G.G_DashLengthEnabled
+        callE("ManageDashLength")
+        NotifyToggle("Dash", _G.G_DashLengthEnabled)
+    end
+    KeybindActions.Fly = function()
+        _G.G_FlyEnabled = not _G.G_FlyEnabled
+        if _G.G_FlyEnabled then callE("StartFly") else callE("StopFly") end
+        NotifyToggle("飞行", _G.G_FlyEnabled)
+    end
+    KeybindActions.Noclip = function()
+        _G.G_Noclip = not _G.G_Noclip
+        if _G.G_Noclip then callE("StartNoclip") else callE("StopNoclip") end
+        NotifyToggle("Noclip", _G.G_Noclip)
+    end
+    KeybindActions.InfJump = function()
+        _G.G_InfJump = not _G.G_InfJump
+        if _G.G_InfJump then callE("StartInfJump") else callE("StopInfJump") end
+        NotifyToggle("无限跳", _G.G_InfJump)
+    end
+    KeybindActions.ForceV4 = function()
+        if _G.G_ForceV4 then callE("StopForceV4") else callE("StartForceV4") end
+    end
+    KeybindActions.ESP = function()
+        _G.G_ESP = not _G.G_ESP
+        if not _G.G_ESP then callE("ClearESP") end
+        NotifyToggle("ESP", _G.G_ESP)
+    end
+    KeybindActions.AimSkill = function()
+        _G.G_SilentAimSkill = not _G.G_SilentAimSkill
+        NotifyToggle("技能自瞄", _G.G_SilentAimSkill)
+    end
+    KeybindActions.AimM1 = function()
+        _G.G_SilentAimM1R = not _G.G_SilentAimM1R
+        NotifyToggle("M1自瞄", _G.G_SilentAimM1R)
+    end
+    KeybindActions.ShowFOV = function()
+        _G.G_SilentAimShowFOV = not _G.G_SilentAimShowFOV
+        callE("ApplyVisualVisibility")
+        NotifyToggle("FOV", _G.G_SilentAimShowFOV)
+    end
+    KeybindActions.GunM1 = function()
+        _G.G_GunM1 = not _G.G_GunM1
+        if _G.G_GunM1 then callE("StartGunM1") else callE("StopGunM1") end
+    end
+    KeybindActions.FruitM1 = function()
+        _G.G_FruitM1 = not _G.G_FruitM1
+        if _G.G_FruitM1 then callE("StartFruitM1") else callE("StopFruitM1") end
+    end
+    KeybindActions.AutoCombo = function()
+        if _G.G_AutoCombo then callE("StopAutoCombo") else callE("StartAutoCombo") end
+    end
+    KeybindActions.AutoDodge = function()
+        if _G.G_AutoDodge then callE("StopAutoDodge") else callE("StartAutoDodge") end
+    end
+    KeybindActions.NoStun = function()
+        _G.G_NoStun = not _G.G_NoStun
+        if _G.G_NoStun then callE("StartNoStun") else callE("StopNoStun") end
+    end
+    KeybindActions.AHKCycle = function() callE("DoAHKCycle") end
+    KeybindActions.AHKReset = function() callE("ResetAHKCycle") end
+    print("[月食] RegisterKeybindActions OK")
+end
+
+
+-- [removed duplicate keybind InputBegan — use 热键双通道 only]
+
+
+
+
+-- ========== Config ==========
+_G.G_SilentAimM1R            = _G.G_SilentAimM1R ~= false
+_G.G_SilentAimSkill          = _G.G_SilentAimSkill ~= false
+_G.G_UseNamecallAim          = true  -- 轻量：只改最后一个 Vector3/CFrame
+_G.G_SilentAimShowFOV        = _G.G_SilentAimShowFOV or false
+_G.G_SilentAimFOV            = _G.G_SilentAimFOV or 150
+_G.G_SilentAimPart           = _G.G_SilentAimPart or "Head"
+_G.G_SilentAimTargetPlayers  = true
+_G.G_SilentAimTargetMobs     = _G.G_SilentAimTargetMobs ~= false  -- 默认开：可瞄小怪
+_G.G_SilentAimShowLine       = false
+_G.G_SilentAimFOVMode        = _G.G_SilentAimFOVMode or "跟随鼠标"
+_G.G_SilentAimTeamCheck      = true
+_G.G_PvPIslandOnly           = false  -- 仅 PvP/战斗岛才锁人
+_G.G_CamLock                 = _G.G_CamLock or false
+_G.G_CamLockSmooth            = _G.G_CamLockSmooth or 0.12   -- 0.05~0.25 越小平滑
+_G.G_SilentAimExcludePVP     = _G.G_SilentAimExcludePVP or false
+_G.G_SilentAimMethod         = _G.G_SilentAimMethod or "FOV圈内"
+_G.G_SoruAim                 = _G.G_SoruAim ~= false
+_G.G_SkillAimMode            = _G.G_SkillAimMode or "FOV"
+_G.G_SilentAimSelectedPlayer = _G.G_SilentAimSelectedPlayer or ""
+_G.FOVMode                   = _G.G_SilentAimFOVMode
+
+_G.G_translateAccel          = _G.G_translateAccel or false
+_G.G_SpeedAdd                = math.clamp(tonumber(_G.G_SpeedAdd) or tonumber(_G.G_translateSpeed) or 0, 0, 500)
+_G.G_translateSpeed          = _G.G_SpeedAdd -- compat
+_G.G_DashLengthEnabled       = _G.G_DashLengthEnabled or false
+_G.G_DashAdd                 = math.clamp(tonumber(_G.G_DashAdd) or 0, 0, 200)
+_G.G_DashLength              = _G.G_DashAdd -- compat
+
+-- 新功能默认关
+_G.G_FlyEnabled              = _G.G_FlyEnabled or false
+_G.G_FlySpeed                = math.clamp(tonumber(_G.G_FlySpeed) or 50, 10, 200)
+_G.G_NoStun                  = _G.G_NoStun or false
+_G.G_TPEnabled               = _G.G_TPEnabled or false
+_G.G_TPDistance              = math.clamp(tonumber(_G.G_TPDistance) or 4, 2, 80)
+_G.G_FastM1                  = _G.G_FastM1 or false
+_G.G_FastM1Mode              = _G.G_FastM1Mode or "按住左键"
+_G.G_FastM1Delay             = math.clamp(tonumber(_G.G_FastM1Delay) or 0.06, 0.02, 0.35)
+_G.G_AutoFarmM1              = _G.G_AutoFarmM1 or false
+_G.G_AutoFarmHP              = math.clamp(tonumber(_G.G_AutoFarmHP) or 30, 5, 100)
+_G.G_AutoFarmRange           = math.clamp(tonumber(_G.G_AutoFarmRange) or 40, 10, 120)
+
+_G.G_AutoCombo               = _G.G_AutoCombo or false
+_G.G_ComboDelay              = math.clamp(tonumber(_G.G_ComboDelay) or 0.35, 0.1, 2)
+_G.G_AutoDodge               = _G.G_AutoDodge or false
+_G.G_ESP                     = _G.G_ESP or false
+_G.G_InfJump                 = _G.G_InfJump or false
+_G.G_Noclip                  = _G.G_Noclip or false
+_G.G_AutoSwitchTarget        = _G.G_AutoSwitchTarget ~= false
+_G.G_LowHPAlert              = _G.G_LowHPAlert or false
+_G.G_AFKMode                 = _G.G_AFKMode or false
+_G.G_ForceV4                 = _G.G_ForceV4 or false
+_G.G_GodMode                 = _G.G_GodMode or false
+_G.G_OneShot                 = _G.G_OneShot or false
+_G.G_TPKey                   = _G.G_TPKey or "Q"
+
+local SPEED_MIN, SPEED_MAX = 0, 100
+local DASH_MIN, DASH_MAX = 0, 30
+local BaseWalkSpeed = 16
+local BaseDashLength = 1
+
+-- 分武器可开技能（按你的规格）
+_G.G_SkillMap = _G.G_SkillMap or {
+    Melee = { Z = true, X = true, C = true },
+    Sword = { Z = true, X = true, C = true },
+    Fruit = { Z = true, X = true, C = true, V = true, F = true },
+    Gun   = { Z = true, X = true },
+}
+-- 每个技能键单独模式：FOV | Global（不是一调全改）
+_G.G_SkillAimModeMap = _G.G_SkillAimModeMap or {
+    Z = "FOV", X = "FOV", C = "FOV", V = "FOV", F = "FOV", R = "FOV",
+}
+
+
+-- ========== Config (autoload / save) ==========
+local HttpService = game:GetService("HttpService")
+-- HttpService already defined
+
+-- ========== Multi Config（自定义名 · 无自动保存 · 可设 Autoload）==========
+
+-- HttpService already defined
+local CONFIG_DIR = "EclipseConfigs"
+local CONFIG_INDEX = CONFIG_DIR .. "/index.json"
+local DEFAULT_CONFIG_NAME = "default"
+
+local ConfigKeys = {
+    "G_SilentAimM1R", "G_SilentAimSkill", "G_UseNamecallAim",
+    "G_SilentAimShowFOV", "G_SilentAimFOV", "G_SilentAimPart",
+    "G_SilentAimTargetPlayers", "G_SilentAimTargetMobs", "G_SilentAimShowLine",
+    "G_SilentAimFOVMode", "G_SilentAimTeamCheck", "G_SilentAimExcludePVP", "G_PvPIslandOnly", "G_CamLock", "G_CamLockSmooth",
+    "G_SilentAimMethod", "G_SilentAimSelectedPlayer", "G_SoruAim", "G_SkillAimMode", "G_SkillAimModeMap",
+    "G_translateAccel", "G_SpeedAdd", "G_translateSpeed", "G_DashLengthEnabled", "G_DashAdd", "G_DashLength",
+    "G_FlyEnabled", "G_FlySpeed", "G_NoStun", "G_TPEnabled", "G_TPDistance",
+    "G_FastM1", "G_FastM1Mode", "G_FastM1Delay", "G_AutoCombo", "G_ComboDelay", "G_AutoDodge",
+    "G_ESP", "G_InfJump", "G_Noclip", "G_AutoSwitchTarget", "G_LowHPAlert", "G_AFKMode",
+    "G_ForceV4", "G_SkillMap", "G_SoruSkillEnabled", "G_SoruSkillKey", "G_SoruSkillDelay", "G_SoruSkillSeq", "G_SoruSpamEnabled", "G_SoruSpamKey", "G_SoruSpamInterval", "G_SoruBindAim", "G_Keybinds", "G_GunM1Delay", "G_FruitM1Delay",
+    "G_FruitM1", "G_GunM1", "G_RemoveLava", "G_RemoveFog", "G_RemoveAnim", "G_RemoveGhostShip",
+    "G_WalkOnWater", "G_UnlockFPS", "G_DodgeNoCD",
+}
+
+_G.G_FruitM1 = _G.G_FruitM1 or false
+_G.G_GunM1 = _G.G_GunM1 or false
+_G.G_RemoveLava = _G.G_RemoveLava or false
+_G.G_RemoveFog = _G.G_RemoveFog or false
+_G.G_RemoveAnim = _G.G_RemoveAnim or false
+_G.G_RemoveGhostShip = _G.G_RemoveGhostShip or false
+_G.G_WalkOnWater = _G.G_WalkOnWater or false
+_G.G_UnlockFPS = _G.G_UnlockFPS or false
+_G.G_DodgeNoCD = _G.G_DodgeNoCD or false
+
+local function DeepCopy(v)
+    if type(v) ~= "table" then return v end
+    local c = {}
+    for k, x in pairs(v) do c[k] = DeepCopy(x) end
+    return c
+end
+
+local function EnsureConfigDir()
+    if typeof(isfolder) == "function" and typeof(makefolder) == "function" then
+        if not isfolder(CONFIG_DIR) then
+            pcall(makefolder, CONFIG_DIR)
+        end
+        return true
+    end
+    return false
+end
+
+local function SafeReadJson(path)
+    if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" then return nil end
+    if not isfile(path) then return nil end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(path))
+    end)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
+local function SafeWriteJson(path, tbl)
+    if typeof(writefile) ~= "function" then
+        warn("[Config] 当前 executor 无 writefile")
+        return false
+    end
+    EnsureConfigDir()
+    local ok, err = pcall(function()
+        writefile(path, HttpService:JSONEncode(tbl))
+    end)
+    if not ok then warn("[Config] write fail", err) end
+    return ok
+end
+
+local function LoadIndex()
+    local idx = SafeReadJson(CONFIG_INDEX)
+    if type(idx) ~= "table" then
+        idx = { autoload = DEFAULT_CONFIG_NAME, configs = { DEFAULT_CONFIG_NAME } }
+    end
+    if type(idx.configs) ~= "table" then idx.configs = { DEFAULT_CONFIG_NAME } end
+    if type(idx.autoload) ~= "string" or idx.autoload == "" then idx.autoload = DEFAULT_CONFIG_NAME end
+    return idx
+end
+
+local function SaveIndex(idx)
+    return SafeWriteJson(CONFIG_INDEX, idx)
+end
+
+local function ConfigPath(name)
+    name = tostring(name or DEFAULT_CONFIG_NAME):gsub("[^%w%-%_]", "_")
+    if name == "" then name = DEFAULT_CONFIG_NAME end
+    return CONFIG_DIR .. "/" .. name .. ".json", name
+end
+
+local function CollectConfig()
+    local data = {}
+    for _, key in ipairs(ConfigKeys) do
+        if key ~= "G_SilentAimSelectedPlayer" and _G[key] ~= nil then
+            data[key] = DeepCopy(_G[key])
+        end
+    end
+    data.FOVMode = _G.FOVMode
+    return data
+end
+
+local function ApplyConfigData(data)
+    if type(data) ~= "table" then return end
+    for _, key in ipairs(ConfigKeys) do
+        if key ~= "G_SilentAimSelectedPlayer" and data[key] ~= nil then
+            _G[key] = DeepCopy(data[key])
+        end
+    end
+    if data.FOVMode then
+        _G.FOVMode = data.FOVMode
+        _G.G_SilentAimFOVMode = data.FOVMode
+    end
+    -- 每次加载配置清空指定玩家，防止自瞄失效
+    _G.G_SilentAimSelectedPlayer = ""
+    _G.G_SilentAimMethod = "FOV圈内"
+    _G.G_SelectPlayerEnabled = false
+end
+
+local function ListConfigNames()
+    local idx = LoadIndex()
+    local names = {}
+    for _, n in ipairs(idx.configs) do
+        if type(n) == "string" then table.insert(names, n) end
+    end
+    if #names == 0 then names = { DEFAULT_CONFIG_NAME } end
+    return names, idx.autoload
+end
+
+local function SaveConfigAs(name)
+    local path, clean = ConfigPath(name)
+    local ok = SafeWriteJson(path, CollectConfig())
+    if not ok then return false, clean end
+    local idx = LoadIndex()
+    local found = false
+    for _, n in ipairs(idx.configs) do
+        if n == clean then found = true break end
+    end
+    if not found then table.insert(idx.configs, clean) end
+    SaveIndex(idx)
+    print("[Config] saved:", clean)
+    return true, clean
+end
+
+local function LoadConfigByName(name)
+    local path, clean = ConfigPath(name)
+    local data = SafeReadJson(path)
+    if not data then
+        -- 兼容旧单文件
+        local legacy = SafeReadJson("SilentAim_Stealth_Config.json")
+        if legacy then
+            ApplyConfigData(legacy)
+            print("[Config] loaded legacy file as", clean)
+            return true, clean
+        end
+        warn("[Config] not found:", clean)
+        return false, clean
+    end
+    ApplyConfigData(data)
+    print("[Config] loaded:", clean)
+    return true, clean
+end
+
+local function SetAutoload(name)
+    local _, clean = ConfigPath(name)
+    local idx = LoadIndex()
+    idx.autoload = clean
+    local found = false
+    for _, n in ipairs(idx.configs) do
+        if n == clean then found = true break end
+    end
+    if not found then table.insert(idx.configs, clean) end
+    SaveIndex(idx)
+    print("[Config] autoload =", clean)
+    return clean
+end
+
+local function DeleteConfig(name)
+    local path, clean = ConfigPath(name)
+    if clean == DEFAULT_CONFIG_NAME then
+        warn("[Config] 不建议删除 default")
+    end
+    if typeof(delfile) == "function" and typeof(isfile) == "function" and isfile(path) then
+        pcall(delfile, path)
+    end
+    local idx = LoadIndex()
+    local newList = {}
+    for _, n in ipairs(idx.configs) do
+        if n ~= clean then table.insert(newList, n) end
+    end
+    if #newList == 0 then newList = { DEFAULT_CONFIG_NAME } end
+    idx.configs = newList
+    if idx.autoload == clean then idx.autoload = newList[1] end
+    SaveIndex(idx)
+    return true
+end
+
+-- 启动：只 autoload，不做 autosave
+do
+    EnsureConfigDir()
+    local idx = LoadIndex()
+    local ok = LoadConfigByName(idx.autoload)
+    if not ok then
+        -- 第一次：写一份 default
+        SaveConfigAs(DEFAULT_CONFIG_NAME)
+        SetAutoload(DEFAULT_CONFIG_NAME)
+    end
+end
+
+-- 兼容旧函数名（UI 可能还在调）
+local function SaveConfigFile()
+    local idx = LoadIndex()
+    return SaveConfigAs(idx.autoload or DEFAULT_CONFIG_NAME)
+end
+local function LoadConfigFile()
+    local idx = LoadIndex()
+    return LoadConfigByName(idx.autoload or DEFAULT_CONFIG_NAME)
+end
+
+
+local function EnsureSkillMapDefaults()
+    _G.G_SkillMap = _G.G_SkillMap or {}
+    local defaults = {
+        Melee = { Z = true, X = true, C = true },
+        Sword = { Z = true, X = true, C = true },
+        Fruit = { Z = true, X = true, C = true, V = true, F = true },
+        Gun   = { Z = true, X = true },
+    }
+    for cat, keys in pairs(defaults) do
+        _G.G_SkillMap[cat] = _G.G_SkillMap[cat] or {}
+        for k, v in pairs(keys) do
+            if _G.G_SkillMap[cat][k] == nil then
+                _G.G_SkillMap[cat][k] = v
+            end
+        end
+    end
+end
+EnsureSkillMapDefaults()
+
+local SKILL_KEYS = {
+    Melee = { "Z", "X", "C" },
+    Sword = { "Z", "X", "C" },
+    Fruit = { "Z", "X", "C", "V", "F" },
+    Gun   = { "Z", "X" },
+}
+local CAT_LABEL = {
+    Melee = "拳法 Melee",
+    Sword = "刀剑 Sword",
+    Fruit = "果实 Fruit",
+    Gun   = "枪械 Gun",
+}
+
+local function GetEquippedCategory()
+    local char = LocalPlayer.Character
+    if not char then return "Melee" end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then
+        local ew = char:FindFirstChild("EquippedWeapon")
+        if ew and ew:IsA("Folder") then
+            tool = ew:FindFirstChildOfClass("Tool") or ew:FindFirstChildWhichIsA("Tool")
+        end
+    end
+    if not tool then return "Melee" end
+    local tip = tostring(tool.ToolTip or "")
+    local name = tostring(tool.Name or ""):lower()
+    if tip == "Melee" or tip == "Fighting Style" or tip:find("Melee") or tip:find("Fight") then return "Melee" end
+    if tip == "Sword" or tip:find("Sword") then return "Sword" end
+    if tip == "Gun" or tip:find("Gun") then return "Gun" end
+    if tip == "Blox Fruit" or tip == "Fruit" or tip:find("Fruit") then return "Fruit" end
+    -- 部分果实 ToolTip 为空，名称含常见果/技能型
+    if tip == "" or tip == "nil" then
+        if name:find("fruit") or name:find("-fruit") or name:find("dough") or name:find("dragon")
+            or name:find("leopard") or name:find("venom") or name:find("control") or name:find("spirit")
+            or name:find("shadow") or name:find("magma") or name:find("light") or name:find("dark")
+            or name:find("buddha") or name:find("phoenix") or name:find("portal") or name:find("flame")
+            or name:find("ice") or name:find("quake") or name:find("rumble") or name:find("blizzard") then
+            return "Fruit"
+        end
+    end
+    if name:find("sword") or name:find("blade") or name:find("katana") or name:find("cdk") or name:find("yama") or name:find("tushita") or name:find("scythe") or name:find("trident") then return "Sword" end
+    if name:find("gun") or name:find("rifle") or name:find("pistol") or name:find("kabucha") or name:find("acidum") then return "Gun" end
+    if name:find("godhuman") or name:find("sanguine") or name:find("dragon talon") or name:find("electric claw") or name:find("death step") or name:find("sharkman") or name:find("superhuman") or name:find("combat") then return "Melee" end
+    if name:find("fruit") then return "Fruit" end
+    return "Melee"
+end
+
+local function IsAlive(character)
+    if not character then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0
+end
+
+local LastSkillPressed = "Z"
+local SkillHeld = { Z=false, X=false, C=false, V=false, F=false, R=false }
+
+local function IsLocalAirborneForSoru()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    local st = hum:GetState()
+    if st == Enum.HumanoidStateType.Freefall
+        or st == Enum.HumanoidStateType.Jumping
+        or st == Enum.HumanoidStateType.Flying then
+        return true
+    end
+    if hum.FloorMaterial == Enum.Material.Air then return true end
+    return false
+end
+
+local SkillPressTime = { Z=0, X=0, C=0, V=0, F=0, R=0 }
+local SKILL_AIM_WINDOW = 1.6 -- 按下后窗口内仍算该技能（BF 常先松键再发 remote）
+track(UIS.InputBegan:Connect(function(input)
+    if not ScriptAlive or UIS:GetFocusedTextBox() then return end
+    local map = {
+        [Enum.KeyCode.Z] = "Z", [Enum.KeyCode.X] = "X", [Enum.KeyCode.C] = "C",
+        [Enum.KeyCode.V] = "V", [Enum.KeyCode.F] = "F", [Enum.KeyCode.R] = "R",
+    }
+    local k = map[input.KeyCode]
+    if k then
+        if k ~= "R" then LastSkillPressed = k end
+        SkillHeld[k] = true
+        SkillPressTime[k] = tick()
+    end
+end))
+track(UIS.InputEnded:Connect(function(input)
+    local map = {
+        [Enum.KeyCode.Z] = "Z", [Enum.KeyCode.X] = "X", [Enum.KeyCode.C] = "C",
+        [Enum.KeyCode.V] = "V", [Enum.KeyCode.F] = "F", [Enum.KeyCode.R] = "R",
+    }
+    local k = map[input.KeyCode]
+    if not k then return end
+    if k == "R" then
+        -- Flash Step 常在松键后仍读一次 Hit，延迟清 R
+        task.delay(0.2, function()
+            if SkillHeld then SkillHeld.R = false end
+        end)
+    else
+        SkillHeld[k] = false
+    end
+end))
+
+local function IsSkillKeyActive(sk)
+    if SkillHeld and SkillHeld[sk] then return true end
+    local t0 = SkillPressTime and SkillPressTime[sk]
+    if t0 and (tick() - t0) <= SKILL_AIM_WINDOW then return true end
+    return false
+end
+
+
+local function GetActiveSkillAimMode()
+    -- 当前按下/窗口内的技能键的模式；多键时优先 Global，否则 FOV
+    local map = _G.G_SkillAimModeMap or {}
+    local hasGlobal, hasFov = false, false
+    for _, sk in ipairs({"Z", "X", "C", "V", "F", "R"}) do
+        if IsSkillKeyActive(sk) then
+            local m = tostring(map[sk] or "FOV")
+            if m == "Global" or m == "全局" then hasGlobal = true
+            else hasFov = true end
+        end
+    end
+    if hasGlobal then return "Global" end
+    if hasFov then return "FOV" end
+    -- 无技能窗：用默认 G_SkillAimMode（M1 等）
+    return tostring(_G.G_SkillAimMode or "FOV")
+end
+
+local function IsCurrentSkillEnabled()
+    if not ScriptAlive or not _G.G_SilentAimSkill then return false end
+    EnsureSkillMapDefaults()
+    local cat = GetEquippedCategory()
+    local map = _G.G_SkillMap and _G.G_SkillMap[cat]
+    local function keyAllowed(sk)
+        -- 当前分类显式 false → 不开
+        if type(map) == "table" and map[sk] == false then return false end
+        if type(map) == "table" and map[sk] == true then return true end
+        -- 表缺失该键：默认允许（避免分类识别错导致全废）
+        if type(map) ~= "table" then return true end
+        if map[sk] == nil then return true end
+        return false
+    end
+    for _, sk in ipairs({"Z", "X", "C", "V", "F"}) do
+        if keyAllowed(sk) and IsSkillKeyActive(sk) then return true end
+    end
+    return false
+end
+
+
+
+
+
+-- namecall RJR
+do
+    local mt = getrawmetatable(game)
+    local oldNamecall = mt.__namecall
+    setreadonly(mt, false)
+    local FS, IS = "FireServer", "InvokeServer"
+    mt.__namecall = newcclosure(function(self, ...)
+        -- 强力 namecall 默认关闭，避免技能有动作无特效进CD
+        if not ScriptAlive or not _G.G_SilentAimSkill or not _G.G_UseNamecallAim then
+            return oldNamecall(self, ...)
+        end
+        local method = getnamecallmethod()
+        if method ~= FS and method ~= IS then return oldNamecall(self, ...) end
+        if not IsCurrentSkillEnabled() or not _G.G_SilentAimTargetPos then return oldNamecall(self, ...) end
+        local sName = tostring(self)
+        if sName ~= "RemoteEvent" and sName ~= "CommE" and sName ~= "RemoteFunction" then
+            return oldNamecall(self, ...)
+        end
+        local args = { ... }
+        local tp = _G.G_SilentAimTargetPos
+        if typeof(tp) ~= "Vector3" then return oldNamecall(self, ...) end
+        -- 只改最后两个位置参数（兼顾多点技能，避免全改炸远程）
+        local changed = false
+        local left = 2
+        for i = #args, 1, -1 do
+            if left <= 0 then break end
+            local ty = typeof(args[i])
+            if ty == "Vector3" then
+                args[i] = tp
+                changed = true
+                left = left - 1
+            elseif ty == "CFrame" then
+                args[i] = CFrame.new(tp)
+                changed = true
+                left = left - 1
+            end
+        end
+        if not changed then return oldNamecall(self, ...) end
+        return oldNamecall(self, unpack(args))
+    end)
+    setreadonly(mt, true)
+end
+
+local c = Drawing.new("Circle")
+c.Visible = false
+c.Color = Color3.fromRGB(80, 160, 255)
+c.Radius = _G.G_SilentAimFOV or 150
+c.Thickness = 2
+c.Filled = false
+c.Transparency = 0.4
+
+local Line = Drawing.new("Line")
+Line.Thickness = 1.5
+Line.Color = Color3.fromRGB(80, 160, 255)
+Line.Transparency = 0.5
+Line.Visible = false
+
+local function ApplyVisualVisibility()
+    if not ScriptAlive or HiddenMode then
+        c.Visible = false
+        Line.Visible = false
+        return
+    end
+    c.Visible = _G.G_SilentAimShowFOV == true
+    c.Radius = _G.G_SilentAimFOV or 150
+end
+ApplyVisualVisibility()
+
+track(RunService.RenderStepped:Connect(function()
+    if not ScriptAlive or HiddenMode or not c.Visible then return end
+    local p
+    if _G.FOVMode == "屏幕中心" then
+        local v = Workspace.CurrentCamera.ViewportSize
+        p = Vector2.new(v.X / 2, v.Y / 2)
+    else
+        p = UIS:GetMouseLocation()
+        if p.X <= 0 or p.Y <= 0 then
+            local v = Workspace.CurrentCamera.ViewportSize
+            p = Vector2.new(v.X / 2, v.Y / 2)
+        end
+    end
+    c.Position = p
+end))
+
+local currentSilentAimTarget = nil
+
+-- BF 阵营/盟友机制：
+-- · Marines：全海军自动盟友，不能互伤，不需 Allies UI
+-- · Pirates：同队可互打；仅「加盟友 / Crew 自动盟友」不可打 → 看 Allies UI
+-- · 船员、Raid 队友也会进盟友列表
+local function IsSilentAimAlly(player)
+    if not player or player == LocalPlayer then return false end
+    local myTeam = LocalPlayer.Team
+    local targetTeam = player.Team
+    -- 海军：同为 Marines = 自动盟友
+    if myTeam and targetTeam then
+        if myTeam.Name == "Marines" and targetTeam.Name == "Marines" then
+            return true
+        end
+    end
+    -- 海盗：只查 Allies UI 显式路径，不做深层搜索（避免误判全员盟友）
+    local ok, isAlly = pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local main = pg and pg:FindFirstChild("Main")
+        if not main then return false end
+        local allies = main:FindFirstChild("Allies")
+        if not allies then return false end
+        local container = allies:FindFirstChild("Container")
+        if not container then return false end
+        local alliesInner = container:FindFirstChild("Allies")
+        if not alliesInner then return false end
+        local scrolling = alliesInner:FindFirstChild("ScrollingFrame")
+        if not scrolling then return false end
+        local frame = scrolling:FindFirstChild("Frame")
+        if not frame then return false end
+        return frame:FindFirstChild(player.Name) ~= nil
+    end)
+    return ok and isAlly == true
+end
+
+local function IsPlayerInSafeZone(player)
+    if not player then return false end
+    if player:GetAttribute("PvpDisabled") == true then return true end
+    if player:GetAttribute("InSafeZone") == true or player:GetAttribute("SafeZone") == true then return true end
+    local char = player.Character
+    if not char then return false end
+    if char:GetAttribute("InSafeZone") == true or char:GetAttribute("SafeZone") == true then return true end
+    -- 不用 ForceField 判断：技能/复活也会挂 FF，会误过滤可打目标
+    return false
+end
+
+local function IsSilentAimEnemy(player)
+    if not player or player == LocalPlayer then return false end
+    if IsSilentAimAlly(player) then return false end
+    if type(IsPlayerInSafeZone) == "function" and IsPlayerInSafeZone(player) then return false end
+    return true
+end
+
+-- 列表用：排除自己、队友、盟友
+local function GetEnemyPlayerList()
+    local list = {}
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and IsSilentAimEnemy(player) then
+            if not (_G.G_SilentAimExcludePVP and player:GetAttribute("PvpDisabled") == true) then
+                table.insert(list, player.Name)
+            end
+        end
+    end
+    table.sort(list)
+    return list
+end
+
+local function GetSilentAimOrigin()
+    local p = UIS:GetMouseLocation()
+    if _G.FOVMode == "屏幕中心" or p.X <= 0 or p.Y <= 0 then
+        local v = Workspace.CurrentCamera.ViewportSize
+        return Vector2.new(v.X / 2, v.Y / 2)
+    end
+    return p
+end
+
+local function playerAllowed(player)
+    if not player or player == LocalPlayer then return false end
+    if IsSilentAimAlly(player) then return false end
+    -- 安全区内的人不锁
+    if IsPlayerInSafeZone(player) then return false end
+    if _G.G_SilentAimTeamCheck then
+        local myTeam, targetTeam = LocalPlayer.Team, player.Team
+        if myTeam and targetTeam and myTeam == targetTeam then
+            if myTeam.Name == "Marines" then return false end
+        end
+    end
+    if _G.G_SilentAimExcludePVP and player:GetAttribute("PvpDisabled") == true then return false end
+    return true
+end
+
+local function IsInPvPCombatZone()
+    local lp = LocalPlayer
+    if lp:GetAttribute("PvpDisabled") == true then return false end
+    local char = lp.Character
+    if char then
+        if char:FindFirstChildOfClass("ForceField") then return false end
+        if char:GetAttribute("InSafeZone") == true then return false end
+        if char:GetAttribute("SafeZone") == true then return false end
+    end
+    if lp:GetAttribute("InSafeZone") == true then return false end
+    if lp:GetAttribute("SafeZone") == true then return false end
+    return true
+end
+
+
+
+local function GetClosestTargetToMouse()
+    local selecting = (_G.G_SelectPlayerEnabled == true) and _G.G_SilentAimSelectedPlayer and _G.G_SilentAimSelectedPlayer ~= ""
+    if not selecting and _G.G_PvPIslandOnly and not IsInPvPCombatZone() then
+        return nil
+    end
+
+    -- 选择玩家：仍受 FOV 圈限制（圈外不锁）
+    if _G.G_SelectPlayerEnabled == true and _G.G_SilentAimSelectedPlayer and _G.G_SilentAimSelectedPlayer ~= "" then
+        local name = _G.G_SilentAimSelectedPlayer
+        if name and name ~= "" then
+            local player = Players:FindFirstChild(name)
+            if not player or player == LocalPlayer then return nil end
+            -- 指定玩家：不要求队友检测以外的过滤过严；仍排除队友
+            if _G.G_SilentAimTeamCheck and not IsSilentAimEnemy(player) then return nil end
+            local character = player.Character
+            if not IsAlive(character) then return nil end
+            local part = character:FindFirstChild(_G.G_SilentAimPart) or character:FindFirstChild("HumanoidRootPart")
+            if not part then return nil end
+            -- 指定模式：不强制 FOV，始终只锁此人
+            return part
+        end
+    end
+
+    -- 默认：只锁 FOV 圈内（跟随鼠标 / 屏幕中心 都走同一套屏幕距离）
+    if not _G.G_SilentAimTargetPlayers and not _G.G_SilentAimTargetMobs then return nil end
+    local origin = GetSilentAimOrigin()
+    local closest, shortest = nil, math.huge
+    local function check(character)
+        if not IsAlive(character) then return end
+        local part = character:FindFirstChild(_G.G_SilentAimPart) or character:FindFirstChild("HumanoidRootPart")
+        if not part then return end
+        local pos, onScreen = Workspace.CurrentCamera:WorldToViewportPoint(part.Position)
+        if not onScreen then return end
+        local dist = (Vector2.new(pos.X, pos.Y) - origin).Magnitude
+        local mode = "FOV"
+        if type(GetActiveSkillAimMode) == "function" then
+            mode = GetActiveSkillAimMode()
+        else
+            mode = tostring(_G.G_SkillAimMode or _G.G_SilentAimMethod or "FOV")
+        end
+        local globalMode = (mode == "Global" or mode == "全局" or mode == "全图" or mode == "屏幕最近")
+        local fov = tonumber(_G.G_SilentAimFOV) or 150
+        if globalMode then
+            -- 全局：只要在屏幕内（onScreen）按屏幕距离选最近，不限 FOV 半径
+            if dist < shortest then
+                closest, shortest = part, dist
+            end
+        elseif dist <= fov and dist < shortest then
+            closest, shortest = part, dist
+        end
+    end
+    if _G.G_SilentAimTargetPlayers then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if playerAllowed(player) then check(player.Character) end
+        end
+    end
+    if _G.G_SilentAimTargetMobs then
+        local folders = {
+            Workspace:FindFirstChild("Enemies"),
+            Workspace:FindFirstChild("NPCs"),
+            Workspace:FindFirstChild("Enemy"),
+            Workspace:FindFirstChild("Mobs"),
+        }
+        -- Sea beasts / 特殊怪有时在 Workspace 直接挂 Model
+        for _, folder in ipairs(folders) do
+            if folder then
+                for _, enemy in ipairs(folder:GetChildren()) do
+                    check(enemy)
+                end
+            end
+        end
+    end
+    return closest
+end
+
+
+do
+    local MouseModuleInstance = ReplicatedStorage:FindFirstChild("Mouse")
+    local MouseModule = nil
+    if MouseModuleInstance then pcall(function() MouseModule = require(MouseModuleInstance) end) end
+    if MouseModule and typeof(MouseModule) == "table" then
+        pcall(function()
+            local realStore = { Hit = rawget(MouseModule, "Hit"), Target = rawget(MouseModule, "Target") }
+            local mmt = getrawmetatable(MouseModule)
+            if mmt then setreadonly(mmt, false) else mmt = {}; setmetatable(MouseModule, mmt) end
+            rawset(MouseModule, "Hit", nil)
+            rawset(MouseModule, "Target", nil)
+            mmt.__index = function(self, key)
+                if not ScriptAlive then
+                    if key == "Hit" then return realStore.Hit end
+                    if key == "Target" then return realStore.Target end
+                end
+                if key == "Hit" or key == "Target" then
+                    local rDown = false
+                    if _G.G_SoruAim ~= false and IsLocalAirborneForSoru() then
+                        rDown = SkillHeld and SkillHeld.R
+                        if not rDown then pcall(function() rDown = UIS:IsKeyDown(Enum.KeyCode.R) end) end
+                    end
+                    if rDown then
+                        local part = currentSilentAimTarget
+                        if part and part.Parent then
+                            part = part.Parent:FindFirstChild("HumanoidRootPart") or part
+                        else
+                            part = nil
+                            local my = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                            local best, bd = nil, 1e9
+                            if my then
+                                for _, plr in ipairs(Players:GetPlayers()) do
+                                    if plr ~= LocalPlayer and plr.Character then
+                                        local ok = (type(IsSilentAimEnemy) ~= "function") or IsSilentAimEnemy(plr)
+                                        if ok then
+                                            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                                            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                                            if hrp and hum and hum.Health > 0 then
+                                                local d = (my.Position - hrp.Position).Magnitude
+                                                if d < bd and d < 600 then best, bd = hrp, d end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            part = best
+                        end
+                        if part then
+                            if key == "Hit" then return CFrame.new(part.Position) end
+                            return part
+                        end
+                    end
+                    if ScriptAlive and _G.G_SilentAimSkill and IsCurrentSkillEnabled() and currentSilentAimTarget then
+                        if key == "Hit" then return CFrame.new(currentSilentAimTarget.Position) end
+                        return currentSilentAimTarget
+                    end
+                    if key == "Hit" then return realStore.Hit end
+                    return realStore.Target
+                end
+            end
+            mmt.__newindex = function(self, key, value)
+                if key == "Hit" or key == "Target" then realStore[key] = value else rawset(self, key, value) end
+            end
+            setreadonly(mmt, true)
+        end)
+    end
+end
+
+do
+    local mouse = LocalPlayer:GetMouse()
+    local oldIndex
+    pcall(function()
+        oldIndex = hookmetamethod(game, "__index", function(self, key)
+            if not ScriptAlive or self ~= mouse then return oldIndex(self, key) end
+            if checkcaller and checkcaller() then return oldIndex(self, key) end
+            -- 瞬步自瞄：仅空中 + 开关开 + 按 R → Mouse.Hit 指敌人；地面不改
+            local rDown = false
+            if _G.G_SoruAim ~= false and IsLocalAirborneForSoru() then
+                rDown = SkillHeld and SkillHeld.R
+                if not rDown then
+                    pcall(function() rDown = UIS:IsKeyDown(Enum.KeyCode.R) end)
+                end
+            end
+            if rDown and (key == "Hit" or key == "Target") then
+                local part = nil
+                if currentSilentAimTarget and currentSilentAimTarget.Parent then
+                    local mdl = currentSilentAimTarget.Parent
+                    part = mdl:FindFirstChild("HumanoidRootPart") or currentSilentAimTarget
+                end
+                if not part then
+                    local my = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    local best, bd = nil, 1e9
+                    if my then
+                        for _, plr in ipairs(Players:GetPlayers()) do
+                            if plr ~= LocalPlayer and plr.Character then
+                                local ok = true
+                                if type(IsSilentAimEnemy) == "function" then
+                                    ok = IsSilentAimEnemy(plr)
+                                elseif type(playerAllowed) == "function" then
+                                    ok = playerAllowed(plr)
+                                end
+                                if ok then
+                                    local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                                    local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                                    if hrp and hum and hum.Health > 0 then
+                                        local d = (my.Position - hrp.Position).Magnitude
+                                        if d < bd and d < 600 then best, bd = hrp, d end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    part = best
+                end
+                if part then
+                    if key == "Hit" then return CFrame.new(part.Position) end
+                    if key == "Target" then return part end
+                end
+            end
+            -- 原 M1 自瞄
+            if not _G.G_SilentAimM1R then return oldIndex(self, key) end
+            if not currentSilentAimTarget then return oldIndex(self, key) end
+            local tp = currentSilentAimTarget.Position
+            local cp = Workspace.CurrentCamera.CFrame.Position
+            if key == "Hit" then return CFrame.new(tp)
+            elseif key == "Target" then return currentSilentAimTarget
+            elseif key == "UnitRay" then return Ray.new(cp, (tp - cp).Unit)
+            elseif key == "Origin" then return cp
+            elseif key == "Direction" then return (tp - cp).Unit
+            end
+            return oldIndex(self, key)
+        end)
+    end)
+end
+
+track(RunService.RenderStepped:Connect(function()
+    if not ScriptAlive then
+        currentSilentAimTarget = nil
+        _G.G_SilentAimTargetPos = nil
+        Line.Visible = false
+        return
+    end
+    if not _G.G_SilentAimM1R and not _G.G_SilentAimSkill and not _G.G_SilentAimShowLine then
+        currentSilentAimTarget = nil
+        _G.G_SilentAimTargetPos = nil
+        Line.Visible = false
+        return
+    end
+    local p = UIS:GetMouseLocation()
+    if _G.FOVMode == "屏幕中心" or p.X <= 0 or p.Y <= 0 then
+        local v = Workspace.CurrentCamera.ViewportSize
+        p = Vector2.new(v.X / 2, v.Y / 2)
+    end
+    if _G.G_SilentAimM1R or _G.G_SilentAimSkill then
+        currentSilentAimTarget = GetClosestTargetToMouse()
+        _G.G_SilentAimTargetPos = currentSilentAimTarget and currentSilentAimTarget.Position or nil
+        -- 调试：有目标时每 2 秒打一次
+        if currentSilentAimTarget and (not _G.__SA_LastDbg or tick() - _G.__SA_LastDbg > 2) then
+            _G.__SA_LastDbg = tick()
+            local pn = currentSilentAimTarget.Parent and currentSilentAimTarget.Parent.Name or "?"
+            print("[月食自瞄] 锁定:", pn)
+        end
+    else
+        currentSilentAimTarget = nil
+        _G.G_SilentAimTargetPos = nil
+    end
+    if not HiddenMode and _G.G_SilentAimShowLine and currentSilentAimTarget then
+        local pos, onScreen = Workspace.CurrentCamera:WorldToViewportPoint(currentSilentAimTarget.Position)
+        if onScreen then
+            Line.Visible = true
+            Line.From = p
+            Line.To = Vector2.new(pos.X, pos.Y)
+        else
+            Line.Visible = false
+        end
+    else
+        Line.Visible = false
+    end
+end))
+
+local translateWalkSpeedConn, translateConnection = nil, nil
+
+-- Speed：在原 WalkSpeed 上加 G_SpeedAdd（用户参考版）
+local translateWalkSpeedConn, translateConnection = nil, nil
+local SPEED_ADD_MIN, SPEED_ADD_MAX = 0, 500
+local DASH_ADD_MIN, DASH_ADD_MAX = 0, 200
+if not BaseWalkSpeed then BaseWalkSpeed = 16 end
+if not BaseDashLength then BaseDashLength = 1 end
+_G.G_SpeedAdd = math.clamp(tonumber(_G.G_SpeedAdd) or 0, 0, 500)
+_G.G_DashAdd = math.clamp(tonumber(_G.G_DashAdd) or tonumber(_G.G_DashLength) or 0, 0, 200)
+
+local function CaptureBaseWalkSpeed(humanoid)
+    if not humanoid then return end
+    local cur = humanoid.WalkSpeed
+    if _G.G_translateAccel and _G.G_SpeedAdd and _G.G_SpeedAdd > 0 then
+        local approx = cur - _G.G_SpeedAdd
+        if approx >= 8 and approx <= 40 then
+            BaseWalkSpeed = approx
+            return
+        end
+    end
+    if cur >= 8 and cur <= 40 then
+        BaseWalkSpeed = cur
+    else
+        BaseWalkSpeed = 16
+    end
+end
+
+local function ApplySpeedBoost(humanoid)
+    if not humanoid or not _G.G_translateAccel then return end
+    local add = math.clamp(tonumber(_G.G_SpeedAdd) or 0, SPEED_ADD_MIN, SPEED_ADD_MAX)
+    -- 隐蔽：微抖动 + 小步逼近，少一次顶满整数值
+    local jitter = (math.random() - 0.5) * 0.4
+    local target = math.max(1, BaseWalkSpeed + add + jitter)
+    local cur = humanoid.WalkSpeed
+    if math.abs(cur - target) < 0.45 then return end
+    if cur < target then
+        humanoid.WalkSpeed = math.min(target, cur + math.max(0.6, add * 0.06 + 0.5))
+    else
+        humanoid.WalkSpeed = target
+    end
+end
+
+-- 兼容旧名
+local function ApplyTranslateWalkSpeed(humanoid)
+    ApplySpeedBoost(humanoid)
+end
+
+local function StartTranslateAccel()
+    local function bind(char)
+        if not char then return end
+        local humanoid = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+        if not humanoid then return end
+        CaptureBaseWalkSpeed(humanoid)
+        ApplySpeedBoost(humanoid)
+        if translateWalkSpeedConn then pcall(function() translateWalkSpeedConn:Disconnect() end) end
+        translateWalkSpeedConn = humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+            if not ScriptAlive or not _G.G_translateAccel or humanoid.Health <= 0 then return end
+            local expected = math.max(1, BaseWalkSpeed + (tonumber(_G.G_SpeedAdd) or 0))
+            if math.abs(humanoid.WalkSpeed - expected) > 0.5 then
+                if humanoid.WalkSpeed < expected and humanoid.WalkSpeed >= 8 and humanoid.WalkSpeed <= 40 then
+                    BaseWalkSpeed = humanoid.WalkSpeed
+                end
+                ApplySpeedBoost(humanoid)
+            end
+        end)
+        track(translateWalkSpeedConn)
+    end
+    if LocalPlayer.Character then bind(LocalPlayer.Character) end
+    if translateConnection then pcall(function() translateConnection:Disconnect() end) end
+    translateConnection = LocalPlayer.CharacterAdded:Connect(bind)
+    track(translateConnection)
+end
+
+local function StopTranslateAccel()
+    _G.G_translateAccel = false
+    if translateWalkSpeedConn then pcall(function() translateWalkSpeedConn:Disconnect() end); translateWalkSpeedConn = nil end
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() hum.WalkSpeed = BaseWalkSpeed end) end
+end
+
+local speedHB = nil
+local function StartSpeedHB()
+    if speedHB then return end
+    speedHB = RunService.Heartbeat:Connect(function()
+        if not ScriptAlive or not _G.G_translateAccel then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp or hum.Health <= 0 then return end
+        local add = math.clamp(tonumber(_G.G_SpeedAdd) or 0, SPEED_ADD_MIN, SPEED_ADD_MAX)
+        local target = math.max(1, BaseWalkSpeed + add)
+        local state = hum:GetState()
+        local air = state == Enum.HumanoidStateType.Freefall
+            or state == Enum.HumanoidStateType.Jumping
+            or state == Enum.HumanoidStateType.Flying
+        if air then
+            -- 空中不推速度向量；加量约 35%，减轻挂感
+            target = math.max(1, BaseWalkSpeed + add * 0.35)
+        end
+        if math.abs(hum.WalkSpeed - target) > 0.5 then
+            hum.WalkSpeed = target
+        end
+    end)
+    track(speedHB)
+end
+
+local function StopSpeedHB()
+    if speedHB then pcall(function() speedHB:Disconnect() end); speedHB = nil end
+end
+
+-- Dash：原 DashLength + G_DashAdd，持续写回
+local DashConnection = nil
+local function ManageDashLength()
+    if DashConnection then pcall(function() task.cancel(DashConnection) end); DashConnection = nil end
+    if not _G.G_DashLengthEnabled then
+        local character = LocalPlayer.Character
+        if character then
+            pcall(function()
+                character:SetAttribute("DashLength", nil)
+                character:SetAttribute("DashLengthAir", nil)
+            end)
+        end
+        return
+    end
+    DashConnection = task.spawn(function()
+        while ScriptAlive and _G.G_DashLengthEnabled do
+            task.wait(0.18)
+            local character = LocalPlayer.Character
+            if character then
+                local cur = character:GetAttribute("DashLength")
+                local add = math.clamp(tonumber(_G.G_DashAdd) or 0, DASH_ADD_MIN, DASH_ADD_MAX)
+                add = add + (math.random() - 0.5) * 0.12
+                -- 避免把「已加量」当成 base：若 cur ≈ base+add 则保持 BaseDashLength
+                if typeof(cur) == "number" and cur > 0 and cur < 80 then
+                    local maybeBase = cur - add
+                    if maybeBase >= 0.5 and maybeBase <= 20 and add > 0 then
+                        BaseDashLength = maybeBase
+                    elseif add == 0 and cur <= 20 then
+                        BaseDashLength = cur
+                    end
+                end
+                local val = math.max(1, (BaseDashLength or 1) + add)
+                character:SetAttribute("DashLength", val)
+                character:SetAttribute("DashLengthAir", val)
+            end
+        end
+        DashConnection = nil
+    end)
+end
+
+
+local MainUI, MainFrame = nil, nil
+local function SetHiddenMode(on)
+    HiddenMode = on
+    UILockedByHide = on
+    -- 关所有可见层：线/圈/窗/悬浮钮；功能与钩子保持运行
+    pcall(function()
+        if Line then Line.Visible = false end
+        if c then c.Visible = false end
+    end)
+    pcall(function()
+        if type(ApplyVisualVisibility) == "function" then ApplyVisualVisibility() end
+    end)
+    if MainFrame then
+        MainFrame.Visible = not on
+    end
+    if MainWindow then
+        pcall(function()
+            if on then
+                if MainWindow.Close then MainWindow:Close() end
+                if MainWindow.SetVisible then MainWindow:SetVisible(false) end
+            else
+                UILockedByHide = false
+                if MainWindow.Open then MainWindow:Open() end
+                if MainWindow.SetVisible then MainWindow:SetVisible(true) end
+            end
+        end)
+    end
+    if Window then
+        pcall(function()
+            if on then
+                if Window.Close then Window:Close() end
+                if Window.SetVisible then Window:SetVisible(false) end
+            else
+                if Window.Open then Window:Open() end
+                if Window.SetVisible then Window:SetVisible(true) end
+            end
+        end)
+    end
+    -- 藏悬浮开窗按钮 / 其它月食 GUI
+    pcall(function()
+        local parents = {
+            game:GetService("CoreGui"),
+            LocalPlayer:FindFirstChild("PlayerGui"),
+            (typeof(gethui) == "function" and gethui()) or nil,
+        }
+        for _, parent in ipairs(parents) do
+            if parent then
+                for _, gui in ipairs(parent:GetChildren()) do
+                    local n = string.lower(tostring(gui.Name))
+                    if n:find("wind") or n:find("silent") or n:find("stealth") or n:find("eclipse") or n:find("月") or n:find("sa_") then
+                        if on then
+                            pcall(function() gui.Enabled = false end)
+                            pcall(function() if gui:IsA("ScreenGui") then gui.Enabled = false end end)
+                        else
+                            pcall(function() gui.Enabled = true end)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not on then UILockedByHide = false end
+    print("[月食]", on and "已隐藏 GUI（功能仍在）· /e show 恢复" or "已显示 GUI")
+end
+local function ForceKill()
+    ScriptAlive = false
+    HiddenMode = true
+    _G.G_SilentAimSkill = false
+    _G.G_SilentAimM1R = false
+    _G.G_CamLock = false
+    _G.G_translateAccel = false
+    _G.G_DashLengthEnabled = false
+    _G.G_FlyEnabled = false
+    _G.G_NoStun = false
+    _G.G_FastM1 = false
+    _G.G_AutoCombo = false
+    _G.G_AutoDodge = false
+    _G.G_ESP = false
+    _G.G_InfJump = false
+    _G.G_Noclip = false
+    _G.G_TPEnabled = false
+    _G.G_ForceV4 = false
+            pcall(StopForceV4)
+    
+    
+    currentSilentAimTarget = nil
+    _G.G_SilentAimTargetPos = nil
+    pcall(function() if c then c.Visible = false; c:Remove() end end)
+    pcall(function() if Line then Line.Visible = false; Line:Remove() end end)
+    pcall(StopTranslateAccel)
+    pcall(StopSpeedHB)
+    pcall(ManageDashLength)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopFly) or rawget(_G,"StopFly"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopNoStun) or rawget(_G,"StopNoStun"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopFastM1) or rawget(_G,"StopFastM1"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopAutoCombo) or rawget(_G,"StopAutoCombo"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopAutoDodge) or rawget(_G,"StopAutoDodge"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopInfJump) or rawget(_G,"StopInfJump"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.StopNoclip) or rawget(_G,"StopNoclip"); if f then f() end end)
+    pcall(function() local f=(_G.__Eclipse and _G.__Eclipse.ClearESP) or rawget(_G,"ClearESP"); if f then f() end end)
+    for _, conn in ipairs(ConnBag) do pcall(function() conn:Disconnect() end) end
+    table.clear(ConnBag)
+    -- 拆掉 WindUI 窗口 + 开关键钮 + 残留 ScreenGui
+    pcall(function()
+        if MainWindow then
+            if MainWindow.Destroy then MainWindow:Destroy()
+            elseif MainWindow.Close then MainWindow:Close() end
+        end
+    end)
+    MainWindow = nil
+    for _, parent in ipairs({
+        game:GetService("CoreGui"),
+        LocalPlayer:FindFirstChild("PlayerGui"),
+        (typeof(gethui) == "function" and gethui()) or nil,
+    }) do
+        if parent then
+            for _, gui in ipairs(parent:GetChildren()) do
+                local n = string.lower(tostring(gui.Name))
+                if n:find("wind") or n:find("silent") or n:find("stealth") or n:find("月食") or n:find("eclipse") or n:find("sa_") then
+                    pcall(function() gui:Destroy() end)
+                end
+            end
+        end
+    end
+    print("[月食自瞄 by ECLIPSE] F12 killed · GUI cleared")
+end
+local function HandleChatCommand(msg)
+    if type(msg) ~= "string" then return end
+    local lower = msg:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if lower == "/e hide" or lower == "/ehide" then
+        SetHiddenMode(true)
+        return
+    elseif lower == "/e show" or lower == "/eshow" then
+        SetHiddenMode(false)
+        return
+    end
+    -- /e speed 80  或  /e spd 80  ·  /e dash 25
+    local cmd, num = lower:match("^/e%s+(%a+)%s+([%d%.]+)$")
+    if not cmd then cmd, num = lower:match("^/e(%a+)%s+([%d%.]+)$") end
+    if cmd and num then
+        local v = tonumber(num)
+        if not v then return end
+        if cmd == "speed" or cmd == "spd" or cmd == "s" then
+            _G.G_SpeedAdd = math.clamp(v, SPEED_ADD_MIN or 0, SPEED_ADD_MAX or 500)
+            _G.G_translateSpeed = _G.G_SpeedAdd
+            if not _G.G_translateAccel then
+                _G.G_translateAccel = true
+                pcall(function() if StartTranslateAccel then StartTranslateAccel() end end)
+                pcall(function() if StartSpeedHB then StartSpeedHB() end end)
+            else
+                local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum and ApplyTranslateWalkSpeed then ApplyTranslateWalkSpeed(hum) end
+            end
+            print("[月食] 速度加量 =", _G.G_SpeedAdd)
+        elseif cmd == "dash" or cmd == "d" then
+            _G.G_DashAdd = math.clamp(v, DASH_ADD_MIN or 0, DASH_ADD_MAX or 200)
+            _G.G_DashLength = _G.G_DashAdd
+            _G.G_DashLengthEnabled = true
+            pcall(function() if ManageDashLength then ManageDashLength() end end)
+            print("[月食] Dash加量 =", _G.G_DashAdd)
+        end
+    end
+end
+pcall(function()
+    track(LocalPlayer.Chatted:Connect(function(msg) if ScriptAlive then HandleChatCommand(msg) end end))
+end)
+pcall(function()
+    if TextChatService.ChatInputBarConfiguration then
+        track(TextChatService.SendingMessage:Connect(function(m) if ScriptAlive then HandleChatCommand(m.Text) end end))
+    end
+end)
+track(UIS.InputBegan:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.F12 then ForceKill() end
+end))
+
+
+-- ========== 扩展功能（在原 GUI 前）==========
+local currentSilentAimTarget_ref = function() return currentSilentAimTarget end
+
+-- Speed 改为加量（保留原函数名兼容）
+do
+    local _Apply = ApplyTranslateWalkSpeed
+    ApplyTranslateWalkSpeed = function(humanoid)
+        if not humanoid or not _G.G_translateAccel then return end
+        local add = math.clamp(tonumber(_G.G_SpeedAdd) or tonumber(_G.G_translateSpeed) or 0, 0, 500)
+        if BaseWalkSpeed < 8 then
+            local cur = humanoid.WalkSpeed
+            if cur >= 8 and cur <= 50 then BaseWalkSpeed = cur end
+        end
+        local jitter = (math.random() - 0.5) * 0.4
+        local target = math.max(1, BaseWalkSpeed + add + jitter)
+        local cur = humanoid.WalkSpeed
+        if math.abs(cur - target) < 0.45 then return end
+        if cur < target then
+            humanoid.WalkSpeed = math.min(target, cur + math.max(0.6, add * 0.06 + 0.5))
+        else
+            humanoid.WalkSpeed = target
+        end
+    end
+end
+
+-- Fly：CFrame 位移飞行（BF 对 BodyVelocity 限制多，这套最稳）
+local flyConn
+local function StopFly()
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hum then
+        pcall(function()
+            hum.PlatformStand = false
+            hum.AutoRotate = true
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+    end
+    if hrp then
+        for _, x in ipairs(hrp:GetChildren()) do
+            if tostring(x.Name):find("EclipseFly") then pcall(function() x:Destroy() end) end
+        end
+    end
+end
+local function StartFly()
+    StopFly()
+    _G.G_FlyEnabled = true
+    local function ensureMovers(hrp)
+        local bv = hrp:FindFirstChild("EclipseFlyBV")
+        if not bv then
+            bv = Instance.new("BodyVelocity")
+            bv.Name = "EclipseFlyBV"
+            bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            bv.P = 1250
+            bv.Velocity = Vector3.zero
+            bv.Parent = hrp
+        end
+        local bg = hrp:FindFirstChild("EclipseFlyBG")
+        if not bg then
+            bg = Instance.new("BodyGyro")
+            bg.Name = "EclipseFlyBG"
+            bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+            bg.P = 9e4
+            bg.Parent = hrp
+        end
+        return bv, bg
+    end
+    flyConn = RunService.Heartbeat:Connect(function(dt)
+        if not ScriptAlive or not _G.G_FlyEnabled then StopFly() return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local cam = Workspace.CurrentCamera
+        if not hrp or not hum or not cam or hum.Health <= 0 then return end
+        pcall(function()
+            hum.PlatformStand = true
+            hum.AutoRotate = false
+            hum.WalkSpeed = 0
+        end)
+        local bv, bg = ensureMovers(hrp)
+        local spd = math.clamp(tonumber(_G.G_FlySpeed) or 80, 10, 300)
+        local dir = Vector3.zero
+        if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.yAxis end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
+            dir = dir - Vector3.yAxis
+        end
+        local vel = Vector3.zero
+        if dir.Magnitude > 0 then
+            vel = dir.Unit * spd
+            -- CFrame 推进（防速度被清）
+            hrp.CFrame = hrp.CFrame + vel * math.clamp(dt, 0, 0.05)
+        end
+        pcall(function()
+            bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            bv.Velocity = vel
+            bg.CFrame = cam.CFrame
+            hrp.AssemblyLinearVelocity = vel
+        end)
+    end)
+    track(flyConn)
+end
+
+do
+    _G.__Eclipse = _G.__Eclipse or {}
+    local E = _G.__Eclipse
+    local function set(n,f) if type(f)=="function" then E[n]=f end end
+    set("StartFly", StartFly); set("StopFly", StopFly)
+    set("StartTranslateAccel", StartTranslateAccel); set("StopTranslateAccel", StopTranslateAccel)
+    set("StartSpeedHB", StartSpeedHB); set("StopSpeedHB", StopSpeedHB)
+    set("ManageDashLength", ManageDashLength)
+    set("DoTPBehind", DoTPBehind)
+    set("ApplyVisualVisibility", ApplyVisualVisibility)
+    pcall(RegisterKeybindActions)
+    print("[月食] 早期 API 导出")
+end
+
+local function StopNoStun()
+    if noStunConn then pcall(function() noStunConn:Disconnect() end); noStunConn = nil end
+    if removeAnimTrackConn then pcall(function() removeAnimTrackConn:Disconnect() end); removeAnimTrackConn = nil end
+end
+local function DisableStunAnims(char)
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 3)
+    if not hum then return end
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if animator then
+        for _, t in pairs(animator:GetPlayingAnimationTracks()) do
+            pcall(function() t:Stop(0) end)
+        end
+        if removeAnimTrackConn then pcall(function() removeAnimTrackConn:Disconnect() end) end
+        removeAnimTrackConn = animator.AnimationPlayed:Connect(function(t)
+            if not _G.G_NoStun then return end
+            pcall(function() t:Stop(0) end)
+        end)
+        track(removeAnimTrackConn)
+    end
+end
+local function StartNoStun()
+    StopNoStun()
+    if LocalPlayer.Character then DisableStunAnims(LocalPlayer.Character) end
+    noStunConn = RunService.Heartbeat:Connect(function()
+        -- 仅飞行开启时免控生效
+        if not ScriptAlive or not _G.G_NoStun or not _G.G_FlyEnabled then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        pcall(function()
+            hum:SetStateEnabled(Enum.HumanoidStateType.Stunned, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Stunned
+                or st == Enum.HumanoidStateType.FallingDown
+                or st == Enum.HumanoidStateType.Ragdoll
+                or st == Enum.HumanoidStateType.PlatformStanding then
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+                hum.PlatformStand = false
+            end
+        end)
+        for _, name in ipairs({"Stun","Stunned","Disable","NoMove","Rooted","Freeze","Busy","Endlag","EndLag","UsingMove","Action"}) do
+            local a = char:GetAttribute(name)
+            if a == true then pcall(function() char:SetAttribute(name, false) end) end
+            if typeof(a) == "number" and a ~= 0 then pcall(function() char:SetAttribute(name, 0) end) end
+        end
+    end)
+    track(noStunConn)
+end
+
+-- TP
+function DoTPBehind()
+    if not ScriptAlive then return end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        print("[月食] TP失败: 无角色")
+        return
+    end
+    local targetPart = currentSilentAimTarget
+    if not targetPart then
+        pcall(function()
+            if GetClosestTargetToMouse then targetPart = GetClosestTargetToMouse() end
+        end)
+    end
+    -- 指定玩家
+    if not targetPart and _G.G_SilentAimSelectedPlayer and _G.G_SilentAimSelectedPlayer ~= "" then
+        local plr = Players:FindFirstChild(_G.G_SilentAimSelectedPlayer)
+        if plr and plr.Character then
+            targetPart = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character:FindFirstChild("Head")
+        end
+    end
+    -- 最近敌人玩家
+    if not targetPart then
+        local best, bd = nil, 1e9
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local r = plr.Character:FindFirstChild("HumanoidRootPart")
+                local h = plr.Character:FindFirstChildOfClass("Humanoid")
+                if r and h and h.Health > 0 then
+                    local d = (r.Position - hrp.Position).Magnitude
+                    if d < bd then best, bd = r, d end
+                end
+            end
+        end
+        targetPart = best
+    end
+    -- 最近小怪
+    if not targetPart then
+        local folder = Workspace:FindFirstChild("Enemies")
+        if folder then
+            local best, bd = nil, 1e9
+            for _, m in ipairs(folder:GetChildren()) do
+                local r = m:FindFirstChild("HumanoidRootPart")
+                local h = m:FindFirstChildOfClass("Humanoid")
+                if r and h and h.Health > 0 then
+                    local d = (r.Position - hrp.Position).Magnitude
+                    if d < bd then best, bd = r, d end
+                end
+            end
+            targetPart = best
+        end
+    end
+    if not targetPart then
+        print("[月食] TP失败: 无目标（开自瞄锁人或靠近敌人）")
+        return
+    end
+    local tModel = targetPart.Parent
+    local tHRP = (tModel and tModel:FindFirstChild("HumanoidRootPart")) or targetPart
+    local dist = math.clamp(tonumber(_G.G_TPDistance) or 4, 2, 80)
+    local look = tHRP.CFrame.LookVector
+    local pos = tHRP.Position - look * dist + Vector3.new(0, 1.5, 0)
+    local goal = CFrame.new(pos, tHRP.Position)
+    -- 多次写入，对抗服务端短暂回弹
+    hrp.CFrame = goal
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.defer(function()
+        if hrp and hrp.Parent then
+            hrp.CFrame = goal
+            hrp.AssemblyLinearVelocity = Vector3.zero
+        end
+    end)
+    task.delay(0.05, function()
+        if hrp and hrp.Parent then
+            hrp.CFrame = goal
+        end
+    end)
+    print("[月食] TP ->", tModel and tModel.Name or "target", "距离", dist)
+end
+
+track(UIS.InputBegan:Connect(function(input)
+    if not ScriptAlive or UIS:GetFocusedTextBox() then return end
+    if not _G.G_TPEnabled then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local key = tostring(_G.G_TPKey or "Q"):upper()
+    if input.KeyCode.Name:upper() == key then
+        DoTPBehind()
+    end
+end))
+
+
+
+
+-- ========== 清图 / 枪果M1 / 冲刺无CD ==========
+local function ApplyRemoveLava(on)
+    _G.G_RemoveLava = on
+    pcall(function()
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if on and (obj.Name:lower():find("lava") or obj.Name:lower():find("magma")) then
+                if obj:IsA("BasePart") then
+                    obj.CanTouch = false
+                    obj.Transparency = 1
+                end
+            end
+        end
+    end)
+end
+
+local function ApplyRemoveFog(on)
+    _G.G_RemoveFog = on
+    pcall(function()
+        local lighting = game:GetService("Lighting")
+        if on then
+            lighting.FogEnd = 1e6
+            lighting.FogStart = 1e6
+        end
+    end)
+end
+
+local function ApplyRemoveGhostShip(on)
+    _G.G_RemoveGhostShip = on
+    pcall(function()
+        for _, obj in ipairs(Workspace:GetChildren()) do
+            local n = obj.Name:lower()
+            if n:find("ghost") and n:find("ship") then
+                if on then obj:Destroy() end
+            end
+        end
+    end)
+end
+
+local removeAnimConn = nil
+local function ApplyRemoveAnim(on)
+    _G.G_RemoveAnim = on
+    if removeAnimConn then pcall(function() removeAnimConn:Disconnect() end); removeAnimConn = nil end
+    if not on then return end
+    removeAnimConn = RunService.Heartbeat:Connect(function()
+        if not ScriptAlive or not _G.G_RemoveAnim then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        pcall(function()
+            for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+                local n = string.lower(track.Name)
+                if n:find("stun") or n:find("hurt") or n:find("hit") or n:find("knock") then
+                    track:Stop(0)
+                end
+            end
+        end)
+    end)
+    track(removeAnimConn)
+end
+
+local waterConn = nil
+local function ApplyWalkOnWater(on)
+    _G.G_WalkOnWater = on
+    if waterConn then pcall(function() waterConn:Disconnect() end); waterConn = nil end
+    if not on then return end
+    waterConn = RunService.Heartbeat:Connect(function()
+        if not ScriptAlive or not _G.G_WalkOnWater then return end
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        pcall(function()
+            local ray = Ray.new(hrp.Position, Vector3.new(0, -5, 0))
+            -- 简单：在水域时抬一点（BF 水域复杂，仅辅助）
+            local ok2, pos = pcall(function()
+                return Workspace:FindPartOnRayWithWhitelist(ray, {})
+            end)
+        end)
+        -- 更稳：给脚下建透明件
+        local floor = hrp:FindFirstChild("_WaterFloor")
+        if not floor then
+            floor = Instance.new("Part")
+            floor.Name = "_WaterFloor"
+            floor.Anchored = true
+            floor.CanCollide = true
+            floor.Transparency = 1
+            floor.Size = Vector3.new(6, 1, 6)
+            floor.Parent = hrp
+        end
+        floor.Position = hrp.Position - Vector3.new(0, 4, 0)
+    end)
+    track(waterConn)
+end
+
+local function ApplyUnlockFPS(on)
+    _G.G_UnlockFPS = on
+    pcall(function()
+        if on and typeof(setfpscap) == "function" then
+            setfpscap(999)
+        elseif typeof(setfpscap) == "function" then
+            setfpscap(60)
+        end
+    end)
+end
+
+local dodgeNoCDConn = nil
+local function ApplyDodgeNoCD(on)
+    _G.G_DodgeNoCD = on
+    if dodgeNoCDConn then pcall(function() dodgeNoCDConn:Disconnect() end); dodgeNoCDConn = nil end
+    if not on then return end
+    dodgeNoCDConn = RunService.Heartbeat:Connect(function()
+        if not ScriptAlive or not _G.G_DodgeNoCD then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        pcall(function()
+            char:SetAttribute("DodgeCooldown", 0)
+            char:SetAttribute("DashCooldown", 0)
+            if char:FindFirstChild("DodgeCooldown") then char.DodgeCooldown.Value = 0 end
+        end)
+    end)
+    track(dodgeNoCDConn)
+end
+
+
+-- ========== FastM1 完整实现 ==========
+local M1_RegisterAttack, M1_RegisterHit, M1_Net = nil, nil, nil
+local fastM1Conn = nil
+
+local function M1_RefreshRemotes()
+    pcall(function()
+        local function findRemote(root, names)
+            if not root then return nil end
+            for _, n in ipairs(names) do
+                local r = root:FindFirstChild(n)
+                if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return r end
+            end
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+                    for _, n in ipairs(names) do
+                        if d.Name == n or d.Name:find(n, 1, true) then return d end
+                    end
+                end
+            end
+            return nil
+        end
+        local Modules = ReplicatedStorage:FindFirstChild("Modules")
+        local Net = Modules and Modules:FindFirstChild("Net")
+        M1_Net = Net
+        local attackNames = {"RE/RegisterAttack", "RegisterAttack"}
+        local hitNames = {"RE/RegisterHit", "RegisterHit"}
+        M1_RegisterAttack = findRemote(Net, attackNames) or findRemote(ReplicatedStorage, attackNames)
+        M1_RegisterHit = findRemote(Net, hitNames) or findRemote(ReplicatedStorage, hitNames)
+        if M1_RegisterAttack and M1_RegisterHit then
+            print("[月食] M1 Remote OK")
+        else
+            warn("[月食] M1 Remote 未齐 Attack=", M1_RegisterAttack, "Hit=", M1_RegisterHit)
+        end
+    end)
+end
+
+local function M1_GetHitList(preferPart)
+    local list = {}
+    local main = nil
+    local char = LocalPlayer.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return list, main end
+
+    local function push(model)
+        if not model or model == char then return end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        local root = model:FindFirstChild("HumanoidRootPart")
+        if not hum or not root or hum.Health <= 0 then return end
+        if (root.Position - myRoot.Position).Magnitude > 100 then return end
+        local part = model:FindFirstChild("Head") or root
+        table.insert(list, { model, part })
+        if not main then main = part end
+    end
+
+    if preferPart and preferPart.Parent then
+        push(preferPart.Parent)
+        main = preferPart.Parent:FindFirstChild("Head") or preferPart
+    end
+
+    if _G.G_SilentAimTargetPlayers ~= false then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                if not _G.G_SilentAimTeamCheck or (IsSilentAimEnemy and IsSilentAimEnemy(plr)) then
+                    push(plr.Character)
+                end
+            end
+        end
+    end
+    if _G.G_SilentAimTargetMobs ~= false then
+        local folder = Workspace:FindFirstChild("Enemies")
+        if folder then
+            for _, m in ipairs(folder:GetChildren()) do push(m) end
+        end
+    end
+    return list, main
+end
+
+
+local function FireFastM1Once()
+    if not M1_RegisterAttack or not M1_RegisterHit then
+        M1_RefreshRemotes()
+    end
+    if not M1_RegisterAttack or not M1_RegisterHit then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not char or not hum or hum.Health <= 0 then return end
+
+    local OthersEnemies = {}
+    local BasePart = nil
+    local myRoot = char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    local myPos = myRoot.Position
+
+    local function push(model)
+        if not model or model == char then return end
+        local h = model:FindFirstChildOfClass("Humanoid")
+        local r = model:FindFirstChild("HumanoidRootPart")
+        if not h or not r or h.Health <= 0 then return end
+        if (r.Position - myPos).Magnitude > 120 then return end
+        local part = model:FindFirstChild("Head") or r
+        -- 随机有效部位（RJR 思路，提高命中）
+        for _, n in ipairs({"Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso"}) do
+            local p = model:FindFirstChild(n)
+            if p then part = p break end
+        end
+        table.insert(OthersEnemies, { model, part })
+        if not BasePart then BasePart = part end
+    end
+
+    -- 优先当前自瞄
+    if currentSilentAimTarget and currentSilentAimTarget.Parent then
+        push(currentSilentAimTarget.Parent)
+        BasePart = currentSilentAimTarget
+    end
+    if _G.G_SilentAimTargetPlayers ~= false then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                push(plr.Character)
+            end
+        end
+    end
+    if _G.G_SilentAimTargetMobs ~= false then
+        for _, folderName in ipairs({"Enemies", "NPCs"}) do
+            local folder = Workspace:FindFirstChild(folderName)
+            if folder then
+                for _, m in ipairs(folder:GetChildren()) do push(m) end
+            end
+        end
+    end
+
+    if not BasePart or #OthersEnemies == 0 then
+        -- 无目标仍 Activate，保本地动画
+        if tool then pcall(function() tool:Activate() end) end
+        return
+    end
+    -- RJR 同款参数：Attack(0.3) + Hit(BasePart, list)
+    pcall(function()
+        M1_RegisterAttack:FireServer(0.3)
+        M1_RegisterHit:FireServer(BasePart, OthersEnemies)
+    end)
+    if tool and tostring(tool.ToolTip or "") ~= "Gun" then
+        pcall(function() tool:Activate() end)
+    end
+end
+
+
+local function StopFastM1()
+    _G.G_FastM1 = false
+    if fastM1Conn then
+        pcall(function() task.cancel(fastM1Conn) end)
+        fastM1Conn = nil
+    end
+end
+
+local function StartFastM1()
+    StopFastM1()
+    _G.G_FastM1 = true
+    M1_RefreshRemotes()
+    local mode = _G.G_FastM1Mode or "按住左键"
+    print("[月食] FastM1 ON ·", mode)
+    fastM1Conn = task.spawn(function()
+        while ScriptAlive and _G.G_FastM1 do
+            local delay = math.clamp(tonumber(_G.G_FastM1Delay) or 0.06, 0.02, 0.35)
+            local modeNow = _G.G_FastM1Mode or "按住左键"
+            local should = false
+            if modeNow == "自动" then
+                should = not UIS:GetFocusedTextBox()
+            else
+                local holding = false
+                pcall(function()
+                    holding = UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                end)
+                should = holding and not UIS:GetFocusedTextBox()
+            end
+            if should then
+                FireFastM1Once()
+            end
+            task.wait(delay)
+        end
+        fastM1Conn = nil
+    end)
+end
+
+M1_RefreshRemotes()
+task.spawn(function()
+    for _ = 1, 8 do
+        if M1_RegisterAttack and M1_RegisterHit then break end
+        task.wait(0.5)
+        M1_RefreshRemotes()
+    end
+end)
+
+
+-- 枪械 / 果实 M1：挂在 FastM1 同循环逻辑外，单独开关时也走 Activate
+
+-- ========== 果实/枪 M1（人挤人同原理）==========
+local fruitM1Task, gunM1Task = nil, nil
+local lastGunM1, lastFruitM1 = 0, 0
+
+local function GetEquippedFruitTool()
+    local char = LocalPlayer.Character
+    if char then
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") and tostring(tool.ToolTip or "") == "Blox Fruit" then
+                return tool
+            end
+        end
+    end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, tool in ipairs(bp:GetChildren()) do
+            if tool:IsA("Tool") and tostring(tool.ToolTip or "") == "Blox Fruit" then
+                return tool
+            end
+        end
+    end
+    return nil
+end
+
+local function FruitM1_FireOnce()
+    local fruit = GetEquippedFruitTool()
+    if not fruit then return end
+    -- 装备果实到角色上才能放
+    local char = LocalPlayer.Character
+    if char and fruit.Parent ~= char then
+        pcall(function() fruit.Parent = char end)
+        task.wait(0.05)
+    end
+    local remote = fruit:FindFirstChild("LeftClickRemote")
+    if not remote then
+        for _, d in ipairs(fruit:GetDescendants()) do
+            if d.Name == "LeftClickRemote" or (d:IsA("RemoteEvent") and d.Name:lower():find("left") and d.Name:lower():find("click")) then
+                remote = d
+                break
+            end
+        end
+    end
+    if not remote then return end
+    local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+    local function fireAt(pos)
+        local dir = (pos - myHRP.Position)
+        if dir.Magnitude < 0.1 then dir = myHRP.CFrame.LookVector else dir = dir.Unit end
+        pcall(function()
+            remote:FireServer(Vector3.new(dir.X, dir.Y, dir.Z), 1, true)
+        end)
+    end
+    -- 优先自瞄目标
+    if currentSilentAimTarget then
+        fireAt(currentSilentAimTarget.Position)
+        return
+    end
+    if _G.G_SilentAimTargetPlayers ~= false then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local thrp = player.Character:FindFirstChild("HumanoidRootPart")
+                local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                if thrp and hum and hum.Health > 0 and (thrp.Position - myHRP.Position).Magnitude < 500 then
+                    fireAt(thrp.Position)
+                end
+            end
+        end
+    end
+    if _G.G_SilentAimTargetMobs ~= false then
+        local folder = Workspace:FindFirstChild("Enemies")
+        if folder then
+            for _, npc in ipairs(folder:GetChildren()) do
+                local thrp = npc:FindFirstChild("HumanoidRootPart")
+                local hum = npc:FindFirstChildOfClass("Humanoid")
+                if thrp and hum and hum.Health > 0 and (thrp.Position - myHRP.Position).Magnitude < 500 then
+                    fireAt(thrp.Position)
+                end
+            end
+        end
+    end
+end
+
+local function StopFruitM1()
+    _G.G_FruitM1 = false
+    fruitM1Task = nil
+end
+local function StartFruitM1()
+    if fruitM1Task then return end
+    _G.G_FruitM1 = true
+    fruitM1Task = task.spawn(function()
+        print("[月食] 果实M1 ON · LeftClickRemote")
+        while ScriptAlive and _G.G_FruitM1 do
+            local delay = math.clamp(tonumber(_G.G_FruitM1Delay) or 0.1, 0.05, 0.5)
+            FruitM1_FireOnce()
+            task.wait(delay)
+        end
+        fruitM1Task = nil
+    end)
+end
+
+local function StopGunM1()
+    _G.G_GunM1 = false
+    gunM1Task = nil
+end
+local function StartGunM1()
+    if gunM1Task then return end
+    _G.G_GunM1 = true
+    gunM1Task = task.spawn(function()
+        print("[月食] 枪械M1 ON")
+        while ScriptAlive and _G.G_GunM1 do
+            local delay = math.clamp(tonumber(_G.G_GunM1Delay) or 0.08, 0.03, 0.5)
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if tool then
+                local tip = tostring(tool.ToolTip or "")
+                local name = string.lower(tool.Name or "")
+                if tip == "Gun" or tip:find("Gun") or name:find("gun") then
+                    pcall(function() tool:Activate() end)
+                    pcall(function() if FireFastM1Once then FireFastM1Once() end end)
+                end
+            end
+            task.wait(delay)
+        end
+        gunM1Task = nil
+    end)
+end
+
+-- 兼容旧 StartExtraM1 名
+local function StartExtraM1() end
+local function StopExtraM1()
+    StopFruitM1()
+    StopGunM1()
+end
+
+
+-- 商店类（远程名因版本而异，全 pcall）
+local function ShopRemote(args)
+    pcall(function()
+        local rem = ReplicatedStorage:FindFirstChild("Remotes")
+        local f = rem and (rem:FindFirstChild("CommF_") or rem:FindFirstChild("CommF") or rem:FindFirstChild("CommE"))
+        if f then
+            if f.InvokeServer then f:InvokeServer(unpack(args))
+            elseif f.FireServer then f:FireServer(unpack(args)) end
+        end
+    end)
+end
+
+local function ShopChangeTeam(team)
+    ShopRemote({"SetTeam", team})
+    ShopRemote({"ChangeTeam", team})
+end
+
+local function ShopRerollRace()
+    ShopRemote({"BlackbeardReward", "Reroll", "2"})
+    ShopRemote({"RaceReroll"})
+    ShopRemote({"RerollRace"})
+end
+
+local function ShopChangeRace(race)
+    ShopRemote({"ChangeRace", race})
+    ShopRemote({"RaceChange", race})
+    ShopRemote({race})
+end
+
+
+
+-- 自动 V4（Backpack/Character Awakening）
+local v4Conn = nil
+local function callAwakeningRemote()
+    local character = LocalPlayer.Character
+    if not character then return false end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local awakening = (backpack and backpack:FindFirstChild("Awakening")) or character:FindFirstChild("Awakening")
+    if not awakening then return false end
+    local remoteFunc = awakening:FindFirstChild("RemoteFunction") or awakening:FindFirstChildWhichIsA("RemoteFunction")
+    if not remoteFunc then
+        for _, d in ipairs(awakening:GetDescendants()) do
+            if d:IsA("RemoteFunction") then remoteFunc = d break end
+        end
+    end
+    if not remoteFunc then return false end
+    local ok = pcall(function() remoteFunc:InvokeServer(true) end)
+    if not ok then ok = pcall(function() remoteFunc:InvokeServer() end) end
+    if not ok then ok = pcall(function() remoteFunc:InvokeServer(1) end) end
+    return ok
+end
+local function TryEnableV4()
+    if callAwakeningRemote() then return end
+    pcall(function()
+        local rem = ReplicatedStorage:FindFirstChild("Remotes")
+        local e = rem and (rem:FindFirstChild("CommE") or rem:FindFirstChild("CommF"))
+        if e and e.FireServer then
+            e:FireServer("Awakening")
+            e:FireServer("RaceV4")
+        end
+    end)
+end
+local function StartForceV4()
+    if v4Conn then return end
+    _G.G_ForceV4 = true
+    TryEnableV4()
+    v4Conn = task.spawn(function()
+        while ScriptAlive and _G.G_ForceV4 do
+            callAwakeningRemote()
+            task.wait(1)
+        end
+        v4Conn = nil
+    end)
+end
+local function StopForceV4()
+    _G.G_ForceV4 = false
+    if v4Conn then pcall(function() task.cancel(v4Conn) end) end
+    v4Conn = nil
+end
+
+
+local CombatLogGui = nil
+local function RefreshCombatLogGui()
+    if not CombatLogGui or not CombatLogGui.Parent then return end
+    local tLabel = CombatLogGui:FindFirstChild("TargetList", true)
+    local kLabel = CombatLogGui:FindFirstChild("KillList", true)
+    local log = _G.G_CombatLog or { targeted = {}, killed = {} }
+    if tLabel then tLabel.Text = "针对: " .. table.concat(log.targeted or {}, ", ") end
+    if kLabel then kLabel.Text = "击杀: " .. table.concat(log.killed or {}, ", ") end
+end
+local function CreateCombatLogGui()
+    if CombatLogGui then pcall(function() CombatLogGui:Destroy() end) end
+    local parent = nil
+    pcall(function() parent = gethui and gethui() end)
+    if not parent then parent = game:GetService("CoreGui") end
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "EclipseCombatLog"
+    sg.ResetOnSpawn = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent = parent
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 260, 0, 90)
+    frame.Position = UDim2.new(0, 12, 0.5, -45)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+    frame.BackgroundTransparency = 0.15
+    frame.BorderSizePixel = 0
+    frame.Parent = sg
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -8, 0, 22)
+    title.Position = UDim2.new(0, 4, 0, 4)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 13
+    title.TextColor3 = Color3.fromRGB(120, 180, 255)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "月食 · 针对/击杀"
+    title.Parent = frame
+    local tLabel = Instance.new("TextLabel")
+    tLabel.Name = "TargetList"
+    tLabel.Size = UDim2.new(1, -8, 0, 28)
+    tLabel.Position = UDim2.new(0, 4, 0, 28)
+    tLabel.BackgroundTransparency = 1
+    tLabel.Font = Enum.Font.Gotham
+    tLabel.TextSize = 11
+    tLabel.TextColor3 = Color3.fromRGB(230, 230, 235)
+    tLabel.TextXAlignment = Enum.TextXAlignment.Left
+    tLabel.TextYAlignment = Enum.TextYAlignment.Top
+    tLabel.TextWrapped = true
+    tLabel.Text = "针对: "
+    tLabel.Parent = frame
+    local kLabel = Instance.new("TextLabel")
+    kLabel.Name = "KillList"
+    kLabel.Size = UDim2.new(1, -8, 0, 28)
+    kLabel.Position = UDim2.new(0, 4, 0, 56)
+    kLabel.BackgroundTransparency = 1
+    kLabel.Font = Enum.Font.Gotham
+    kLabel.TextSize = 11
+    kLabel.TextColor3 = Color3.fromRGB(255, 150, 150)
+    kLabel.TextXAlignment = Enum.TextXAlignment.Left
+    kLabel.TextYAlignment = Enum.TextYAlignment.Top
+    kLabel.TextWrapped = true
+    kLabel.Text = "击杀: "
+    kLabel.Parent = frame
+    CombatLogGui = sg
+    RefreshCombatLogGui()
+end
+local function SetCombatLogGui(on)
+    if on then CreateCombatLogGui() else
+        if CombatLogGui then pcall(function() CombatLogGui:Destroy() end) end
+        CombatLogGui = nil
+    end
+end
+-- 击杀检测
+track(Players.PlayerRemoving:Connect(function() end))
+local killHooked = {}
+local function HookPlayerKill(plr)
+    if not plr or killHooked[plr] then return end
+    killHooked[plr] = true
+    local function bind(char)
+        local hum = char:WaitForChild("Humanoid", 5)
+        if not hum then return end
+        track(hum.Died:Connect(function()
+            -- 粗略：若死亡时我们正锁定该玩家则记击杀
+            local sel = _G.G_SilentAimSelectedPlayer
+            local tgt = currentSilentAimTarget
+            local name = plr.Name
+            if (sel and sel == name) or (tgt and tgt.Parent and tgt.Parent.Name == name) then
+                CombatLogAdd("killed", name)
+                RefreshCombatLogGui()
+            end
+        end))
+    end
+    if plr.Character then bind(plr.Character) end
+    track(plr.CharacterAdded:Connect(bind))
+end
+for _, plr in ipairs(Players:GetPlayers()) do
+    if plr ~= LocalPlayer then HookPlayerKill(plr) end
+end
+track(Players.PlayerAdded:Connect(function(plr)
+    if plr ~= LocalPlayer then HookPlayerKill(plr) end
+end))
+
+
+
+-- ========== 宏 / 连招专区（游戏内实现，非外部 AHK）==========
+-- 原理：AHK 是系统级按键模拟；这里用 UIS 虚拟与 tool 技能节奏在进程内连按
+_G.G_MacroEnabled = _G.G_MacroEnabled or false
+_G.G_MacroSequence = _G.G_MacroSequence or "Z,X,C"
+_G.G_MacroDelay = math.clamp(tonumber(_G.G_MacroDelay) or 0.25, 0.05, 2)
+_G.G_MacroLoop = _G.G_MacroLoop or false
+local macroConn = nil
+
+local function PressKeySim(keyName)
+    -- 优先 VirtualInputManager；回退 keypress
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local kc = Enum.KeyCode[keyName]
+        if vim and kc then
+            vim:SendKeyEvent(true, kc, false, game)
+            task.wait(0.03)
+            vim:SendKeyEvent(false, kc, false, game)
+            return
+        end
+    end)
+    pcall(function()
+        if keypress and keyrelease and Enum.KeyCode[keyName] then
+            keypress(Enum.KeyCode[keyName])
+            task.wait(0.03)
+            keyrelease(Enum.KeyCode[keyName])
+        end
+    end)
+end
+
+local function RunMacroOnce()
+    local seq = tostring(_G.G_MacroSequence or "Z,X,C")
+    local delay = math.clamp(tonumber(_G.G_MacroDelay) or 0.25, 0.05, 2)
+    for part in string.gmatch(seq, "[^,]+") do
+        if not ScriptAlive or not _G.G_MacroEnabled then return end
+        local k = part:gsub("%s+", ""):upper()
+        if k ~= "" then
+            PressKeySim(k)
+            -- 技能自瞄窗口：标记按键
+            if SkillHeld and SkillPressTime then
+                SkillHeld[k] = true
+                SkillPressTime[k] = tick()
+                LastSkillPressed = k
+                task.delay(0.2, function()
+                    if SkillHeld then SkillHeld[k] = false end
+                end)
+            end
+            task.wait(delay)
+        end
+    end
+end
+
+local function StopMacro()
+    _G.G_MacroEnabled = false
+    macroConn = nil
+end
+
+local function StartMacro()
+    if macroConn then return end
+    _G.G_MacroEnabled = true
+    macroConn = task.spawn(function()
+        print("[月食] 宏启动", _G.G_MacroSequence)
+        repeat
+            RunMacroOnce()
+            if not _G.G_MacroLoop then break end
+            task.wait(0.05)
+        until not ScriptAlive or not _G.G_MacroEnabled or not _G.G_MacroLoop
+        macroConn = nil
+        _G.G_MacroEnabled = false
+        print("[月食] 宏结束")
+    end)
+end
+
+-- 服务器：重进 / 简单跳服
+local function ServerRejoin()
+    pcall(function()
+        local ts = game:GetService("TeleportService")
+        ts:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end
+local function ServerHop()
+    pcall(function()
+        local ts = game:GetService("TeleportService")
+        local HttpService = game:GetService("HttpService")
+        local req = (syn and syn.request) or http_request or request
+        if not req then
+            warn("[月食] 无 request，无法跳服")
+            return
+        end
+        local url = string.format(
+            "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=25",
+            game.PlaceId
+        )
+        local res = req({ Url = url, Method = "GET" })
+        if not res or not res.Body then return end
+        local data = HttpService:JSONDecode(res.Body)
+        if not data or not data.data then return end
+        for _, server in ipairs(data.data) do
+            if server.id ~= game.JobId and (server.playing or 0) < (server.maxPlayers or 12) then
+                ts:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+                return
+            end
+        end
+        warn("[月食] 无可用服务器")
+    end)
+end
+
+
+
+-- ========== SORU / 闪步宏专区 ==========
+_G.G_SoruSkillEnabled = _G.G_SoruSkillEnabled or false
+_G.G_SoruSkillKey = _G.G_SoruSkillKey or "X"          -- 闪后放的技能
+_G.G_SoruSkillDelay = math.clamp(tonumber(_G.G_SoruSkillDelay) or 0.12, 0.0, 0.5)
+_G.G_SoruSkillSeq = _G.G_SoruSkillSeq or ""           -- 可选：闪后多技能 Z,X
+_G.G_SoruSpamEnabled = _G.G_SoruSpamEnabled or false  -- 按住连闪 R
+_G.G_SoruSpamKey = _G.G_SoruSpamKey or "T"            -- 按住此键连按 R
+_G.G_SoruSpamInterval = math.clamp(tonumber(_G.G_SoruSpamInterval) or 0.05, 0.02, 0.3)
+_G.G_SoruBindAim = _G.G_SoruBindAim ~= false          -- 闪后技能走自瞄窗
+
+local function SafeSendKey(keyName, down)
+    keyName = tostring(keyName or ""):upper()
+    if keyName == "" or keyName == "NONE" then return end
+    local kc = nil
+    pcall(function() kc = Enum.KeyCode[keyName] end)
+    if not kc then return end
+    -- 优先 VirtualInputManager（Xeno 友好）
+    local ok = pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(down and true or false, kc, false, game)
+    end)
+    if ok then return end
+    pcall(function()
+        if down and keypress then keypress(kc) elseif (not down) and keyrelease then keyrelease(kc) end
+    end)
+end
+
+local function TapKey(keyName)
+    SafeSendKey(keyName, true)
+    task.wait(0.025)
+    SafeSendKey(keyName, false)
+end
+
+local function MarkSkillForAim(keyName)
+    if not _G.G_SoruBindAim then return end
+    keyName = tostring(keyName):upper()
+    if SkillHeld and SkillPressTime then
+        SkillHeld[keyName] = true
+        SkillPressTime[keyName] = tick()
+        LastSkillPressed = keyName
+        task.delay(0.35, function()
+            if SkillHeld then SkillHeld[keyName] = false end
+        end)
+    end
+end
+
+local function FireSoruAfterSkills()
+    local delay = math.clamp(tonumber(_G.G_SoruSkillDelay) or 0.08, 0.0, 0.5)
+    task.wait(delay)
+    local function fireOne(k)
+        k = tostring(k or ""):upper()
+        if k == "" then return end
+        MarkSkillForAim(k)
+        print("[月食] 闪后技能 ->", k)
+        -- 1) VirtualInputManager
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            local kc = Enum.KeyCode[k]
+            if kc then
+                vim:SendKeyEvent(true, kc, false, game)
+                task.wait(0.05)
+                vim:SendKeyEvent(false, kc, false, game)
+            end
+        end)
+        -- 2) keypress
+        pcall(function()
+            local kc = Enum.KeyCode[k]
+            if keypress and keyrelease and kc then
+                keypress(kc); task.wait(0.05); keyrelease(kc)
+            end
+        end)
+        -- 3) 工具 RemoteFunction InvokeServer("Z", aimCFrame) 常见于 BF
+        pcall(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+            local aimPos = currentSilentAimTarget and currentSilentAimTarget.Position
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local cf
+            if aimPos and hrp then
+                cf = CFrame.new(hrp.Position, aimPos)
+            elseif hrp then
+                cf = hrp.CFrame
+            end
+            for _, tool in ipairs(char:GetChildren()) do
+                if tool:IsA("Tool") then
+                    local rf = tool:FindFirstChild("RemoteFunction") or tool:FindFirstChildWhichIsA("RemoteFunction")
+                    if rf then
+                        pcall(function() rf:InvokeServer(k, cf) end)
+                        pcall(function() rf:InvokeServer(k) end)
+                    end
+                    for _, d in ipairs(tool:GetDescendants()) do
+                        if d:IsA("RemoteEvent") and (d.Name:find("Skill") or d.Name:find("Move") or d.Name == "RemoteEvent") then
+                            pcall(function() d:FireServer(k, cf) end)
+                        end
+                    end
+                end
+            end
+        end)
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "闪后技能", Content = "已触发 " .. k, Duration = 1.2 })
+            end
+        end)
+    end
+    local seq = tostring(_G.G_SoruSkillSeq or "")
+    if seq ~= "" then
+        for part in string.gmatch(seq, "[^,]+") do
+            local k = part:gsub("%s+", ""):upper()
+            if k ~= "" then fireOne(k); task.wait(0.06) end
+        end
+        return
+    end
+    fireOne(_G.G_SoruSkillKey or "X")
+end
+
+
+-- R 闪后接技能已移除（只做游戏原生瞬步）
+
+-- 连闪：按住自定义键狂按 R
+local soruSpamConn = nil
+local function StopSoruSpamLoop()
+    if soruSpamConn then
+        pcall(function() task.cancel(soruSpamConn) end)
+        soruSpamConn = nil
+    end
+end
+local function StartSoruSpamLoop()
+    StopSoruSpamLoop()
+    if not _G.G_SoruSpamEnabled then return end
+    soruSpamConn = task.spawn(function()
+        while ScriptAlive and _G.G_SoruSpamEnabled do
+            local holdKey = tostring(_G.G_SoruSpamKey or "T"):upper()
+            local holding = false
+            pcall(function()
+                local kc = Enum.KeyCode[holdKey]
+                if kc then holding = UIS:IsKeyDown(kc) end
+            end)
+            if holding and not UIS:GetFocusedTextBox() then
+                TapKey("R")
+                -- 若同时开了闪后技能，Tap R 会走 InputBegan；避免双触发用直接 Fire
+            end
+            task.wait(math.clamp(tonumber(_G.G_SoruSpamInterval) or 0.05, 0.02, 0.3))
+        end
+        soruSpamConn = nil
+    end)
+end
+track(UIS.InputBegan:Connect(function(input, gp)
+    if not ScriptAlive or not _G.G_SoruSpamEnabled then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local holdKey = tostring(_G.G_SoruSpamKey or "T"):upper()
+    if input.KeyCode.Name:upper() == holdKey then
+        StartSoruSpamLoop()
+    end
+end))
+track(UIS.InputEnded:Connect(function(input)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local holdKey = tostring(_G.G_SoruSpamKey or "T"):upper()
+    if input.KeyCode.Name:upper() == holdKey then
+        -- loop 自己检测 IsKeyDown，松开会停
+    end
+end))
+
+-- 一键：闪步（方向朝自瞄）并接技能 — 用 CommE Soru 若可用
+local function SoruTowardTargetThenSkill()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local dest = hrp.Position + hrp.CFrame.LookVector * 40
+    if currentSilentAimTarget then
+        dest = currentSilentAimTarget.Position
+    end
+    pcall(function()
+        local rem = ReplicatedStorage:FindFirstChild("Remotes")
+        local e = rem and rem:FindFirstChild("CommE")
+        if e and e.FireServer then
+            local start = hrp.CFrame
+            local final = CFrame.new(dest + Vector3.new(0, 2, 0))
+            e:FireServer("Soru", start, final, workspace:GetServerTimeNow(), math.random(1, 999999999))
+        else
+            TapKey("R")
+        end
+    end)
+    -- 只做闪步，不接技能
+end
+
+
+
+
+
+_G.G_AHKCycleSeq = _G.G_AHKCycleSeq or "Z,X,C"
+_G.G_AHKCycleIndex = tonumber(_G.G_AHKCycleIndex) or 1
+local function DoAHKCycle()
+    local steps = {}
+    for part in string.gmatch(tostring(_G.G_AHKCycleSeq or "Z,X,C"), "[^,]+") do
+        local s = part:gsub("%s+",""):upper()
+        if s ~= "" then table.insert(steps, s) end
+    end
+    if #steps == 0 then steps = {"Z","X","C"} end
+    local idx = math.clamp(tonumber(_G.G_AHKCycleIndex) or 1, 1, #steps)
+    local step = steps[idx]
+    print("[月食] AHK", step, idx)
+    for i=1,#step do
+        local ch = step:sub(i,i)
+        if ch:match("%a") then
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                local kc = Enum.KeyCode[ch]
+                if kc then vim:SendKeyEvent(true,kc,false,game); task.wait(0.05); vim:SendKeyEvent(false,kc,false,game) end
+            end)
+            task.wait(0.03)
+        end
+    end
+    idx = idx % #steps + 1
+    _G.G_AHKCycleIndex = idx
+end
+local function ResetAHKCycle() _G.G_AHKCycleIndex = 1; print("[月食] AHK重置") end
+-- ===== 热键双通道（Real）=====
+_G.__Eclipse = _G.__Eclipse or {}
+local function GetBindNameFromInput(input)
+    if not input then return nil end
+    local uit = input.UserInputType
+    if uit == Enum.UserInputType.Keyboard and input.KeyCode and input.KeyCode ~= Enum.KeyCode.Unknown then return input.KeyCode.Name end
+    if uit == Enum.UserInputType.MouseButton1 then return "MouseButton1" end
+    if uit == Enum.UserInputType.MouseButton2 then return "MouseButton2" end
+    if uit == Enum.UserInputType.MouseButton3 then return "MouseButton3" end
+    if uit == Enum.UserInputType.MouseButton4 then return "MouseButton4" end
+    if uit == Enum.UserInputType.MouseButton5 then return "MouseButton5" end
+    return nil
+end
+local function IsBindDown(name)
+    name = tostring(name or "")
+    if name=="" or name=="None" then return false end
+    if name:find("MouseButton") then
+        local ok,v = pcall(function() return UIS:IsMouseButtonPressed(Enum.UserInputType[name]) end)
+        return ok and v
+    end
+    local ok,kc = pcall(function() return Enum.KeyCode[name] end)
+    if ok and kc then local ok2,d=pcall(function() return UIS:IsKeyDown(kc) end); return ok2 and d end
+    return false
+end
+local _kbLast = {}
+local function FireKB(action)
+    local n=tick()
+    if _kbLast[action] and n-_kbLast[action]<0.35 then return end
+    _kbLast[action]=n
+    if not next(KeybindActions) then pcall(RegisterKeybindActions) end
+    local fn = KeybindActions[action]
+    if fn then print("[月食] 热键触发", action); local ok,e=pcall(fn); if not ok then warn("[月食]",e) end end
+end
+track(UIS.InputBegan:Connect(function(input, gp)
+    if not ScriptAlive or gp or UIS:GetFocusedTextBox() then return end
+    if _G.__KeyCaptureAction then return end
+    local pressed = GetBindNameFromInput(input)
+    if not pressed then return end
+    for action,keyName in pairs(_G.G_Keybinds or {}) do
+        if keyName and keyName~="None" and tostring(keyName)==pressed then FireKB(action) end
+    end
+end))
+local _was={}
+track(RunService.Heartbeat:Connect(function()
+    if not ScriptAlive or UIS:GetFocusedTextBox() or _G.__KeyCaptureAction then return end
+    for action,keyName in pairs(_G.G_Keybinds or {}) do
+        if keyName and keyName~="None" then
+            local down=IsBindDown(tostring(keyName))
+            local id=action..tostring(keyName)
+            if down and not _was[id] then FireKB(action) end
+            _was[id]=down
+        end
+    end
+end))
+print("[月食] 热键双通道就绪")
+
+-- ========== 真 WindUI ==========
+local WindUI
+local loadErr
+local function tryLoadWindUI()
+    local urls = {
+        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua",
+        "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua",
+        "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua",
+    }
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if typeof(req) == "function" then
+        for i, url in ipairs(urls) do
+            local ok, res = pcall(function() return req({Url=url, Method="GET"}) end)
+            if ok and type(res)=="table" and res.Body and #tostring(res.Body)>100 then
+                local ok2, lib = pcall(function() return loadstring(res.Body)() end)
+                if ok2 and lib then print("[月食] WindUI request", i); return lib end
+                loadErr = lib
+            end
+        end
+    end
+    for i, url in ipairs(urls) do
+        local ok, lib = pcall(function() return loadstring(game:HttpGet(url))() end)
+        if ok and lib then print("[月食] WindUI HttpGet", i); return lib end
+        loadErr = lib
+    end
+    return nil
+end
+WindUI = tryLoadWindUI()
+_G.WindUI = WindUI
+
+if not WindUI then
+    warn("[月食] WindUI 加载失败:", loadErr)
+    print("[月食] 无 UI · 自瞄/战斗逻辑仍按配置恢复 · F12 卸载")
+    pcall(function()
+        if _G.G_translateAccel then StartTranslateAccel(); StartSpeedHB() end
+        if _G.G_DashLengthEnabled then ManageDashLength() end
+        if _G.G_FlyEnabled then StartFly() end
+        if _G.G_NoStun then StartNoStun() end
+        if _G.G_FastM1 then StartFastM1() end
+if _G.G_FruitM1 then StartFruitM1() end
+if _G.G_GunM1 then StartGunM1() end
+        if _G.G_ForceV4 then StartForceV4() end
+        if _G.G_AutoCombo then StartAutoCombo() end
+        if _G.G_AutoDodge then StartAutoDodge() end
+        if _G.G_InfJump then StartInfJump() end
+        if _G.G_Noclip then StartNoclip() end
+        if _G.G_LowHPAlert then StartLowHP() end
+        pcall(RegisterKeybindActions)
+        if _G.G_RemoveLava then ApplyRemoveLava(true) end
+        if _G.G_RemoveFog then ApplyRemoveFog(true) end
+        if _G.G_RemoveAnim then ApplyRemoveAnim(true) end
+        if _G.G_DodgeNoCD then ApplyDodgeNoCD(true) end
+    end)
+    return
+end
+
+-- 尝试把 WindUI 挂到 PlayerGui（Real Executor 友好）
+pcall(function()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 3)
+    if pg and WindUI.SetParent then WindUI:SetParent(pg) end
+end)
+
+local Window = WindUI:CreateWindow({
+    Title = "月食自瞄",
+    Icon = "moon",
+    Author = "by ECLIPSE",
+    Folder = "SilentAim_Stealth",
+    Size = UDim2.fromOffset(580, 460),
+    Theme = "Dark",
+    Transparent = true,
+    SideBarWidth = 140,
+    ToggleKey = nil,
+})
+
+pcall(function()
+    Window:EditOpenButton({
+        Title = "月",
+        Icon = "moon",
+        CornerRadius = UDim.new(0, 12),
+        StrokeThickness = 2,
+        Enabled = true,
+        Draggable = true,
+        OnlyMobile = false,
+    })
+end)
+
+local TabAim = Window:Tab({ Title = "自瞄", Icon = "crosshair" })
+local TabSkill = Window:Tab({ Title = "技能", Icon = "zap" })
+
+TabSkill:Section({ Title = "瞬步 / 模式" })
+TabSkill:Toggle({
+    Title = "瞬步自瞄",
+    Desc = "仅空中生效：空中按 R 才自瞄；地面原生瞬步",
+    Value = _G.G_SoruAim ~= false,
+    Callback = function(v) _G.G_SoruAim = v end
+})
+TabSkill:Dropdown({
+    Title = "R 瞬步模式",
+    Values = { "FOV", "Global" },
+    Value = ((_G.G_SkillAimModeMap or {}).R == "Global") and "Global" or "FOV",
+    Callback = function(v)
+        _G.G_SkillAimModeMap = _G.G_SkillAimModeMap or {}
+        _G.G_SkillAimModeMap.R = v
+    end
+})
+TabSkill:Paragraph({ Title = "说明", Desc = "下方每个技能可单独开/关自瞄，并单独选 FOV 或 Global，不是一键全改" })
+
+
+
+local TabMove = Window:Tab({ Title = "移动", Icon = "move" })
+local TabCombat = Window:Tab({ Title = "战斗", Icon = "swords" })
+local TabHelp = Window:Tab({ Title = "辅助", Icon = "eye" })
+local TabTarget = Window:Tab({ Title = "目标", Icon = "users" })
+local TabCfg = Window:Tab({ Title = "配置", Icon = "settings" })
+local TabMacro = Window:Tab({ Title = "宏", Icon = "zap" })
+local TabServer = Window:Tab({ Title = "服务器", Icon = "server" })
+
+local TabKeys = Window:Tab({ Title = "按键", Icon = "keyboard" })
+
+local TabMisc = Window:Tab({ Title = "清图", Icon = "eraser" })
+local TabShop = Window:Tab({ Title = "商店", Icon = "shopping-cart" })
+
+
+-- 自瞄
+TabAim:Toggle({ Title = "技能自瞄", Desc = "含瞬步R", Value = _G.G_SilentAimSkill, Callback = function(v) _G.G_SilentAimSkill = v end })
+TabAim:Toggle({ Title = "M1 自瞄", Value = _G.G_SilentAimM1R, Callback = function(v) _G.G_SilentAimM1R = v end })
+TabAim:Toggle({ Title = "显示 FOV", Value = _G.G_SilentAimShowFOV, Callback = function(v) _G.G_SilentAimShowFOV = v; ApplyVisualVisibility() end })
+TabAim:Toggle({ Title = "锁定红线", Value = _G.G_SilentAimShowLine, Callback = function(v) _G.G_SilentAimShowLine = v end })
+TabAim:Slider({ Title = "FOV 半径", Step = 1, Value = { Min = 20, Max = 800, Default = _G.G_SilentAimFOV or 150 }, Callback = function(v) _G.G_SilentAimFOV = v; c.Radius = v end })
+TabAim:Dropdown({ Title = "FOV 位置", Values = { "跟随鼠标", "屏幕中心" }, Value = _G.FOVMode or "跟随鼠标", Callback = function(v) _G.FOVMode = v; _G.G_SilentAimFOVMode = v end })
+TabAim:Toggle({ Title = "仅PVP区自瞄", Value = _G.G_PvPIslandOnly == true, Callback = function(v) _G.G_PvPIslandOnly = v end })
+TabAim:Toggle({ Title = "弱 Camlock", Value = _G.G_CamLock == true, Callback = function(v) _G.G_CamLock = v end })
+TabAim:Slider({ Title = "Camlock平滑×100", Step = 1, Value = { Min = 5, Max = 35, Default = math.floor((tonumber(_G.G_CamLockSmooth) or 0.12)*100) }, Callback = function(v) _G.G_CamLockSmooth = v/100 end })
+TabAim:Toggle({ Title = "自动切目标", Value = _G.G_AutoSwitchTarget ~= false, Callback = function(v) _G.G_AutoSwitchTarget = v end })
+
+-- 技能
+for _, cat in ipairs({ "Melee", "Sword", "Fruit", "Gun" }) do
+    if not _G.G_SkillMap[cat] then _G.G_SkillMap[cat] = {} end
+    local map = _G.G_SkillMap[cat]
+    local keys = SKILL_KEYS[cat]
+    TabSkill:Section({ Title = CAT_LABEL[cat] or cat })
+    for _, sk in ipairs(keys) do
+        if map[sk] == nil then map[sk] = true end
+        TabSkill:Toggle({ Title = sk .. " 自瞄开关", Value = map[sk] == true, Callback = function(v) map[sk] = v end })
+        do
+            local keyName = sk
+            local modeMap = _G.G_SkillAimModeMap or {}
+            if modeMap[keyName] == nil then modeMap[keyName] = "FOV" end
+            TabSkill:Dropdown({
+                Title = sk .. " 模式",
+                Values = { "FOV", "Global" },
+                Value = (modeMap[keyName] == "Global") and "Global" or "FOV",
+                Callback = function(v)
+                    _G.G_SkillAimModeMap = _G.G_SkillAimModeMap or {}
+                    _G.G_SkillAimModeMap[keyName] = v
+                end
+            })
+        end
+    end
+end
+
+-- 移动
+TabMove:Toggle({ Title = "Speed Boost", Desc = "原速+加量", Value = _G.G_translateAccel, Callback = function(v)
+    _G.G_translateAccel = v
+    if v then StartTranslateAccel(); pcall(StartSpeedHB) else StopTranslateAccel(); pcall(StopSpeedHB) end
+end })
+TabMove:Slider({ Title = "速度加量", Step = 1, Value = { Min = 0, Max = 500, Default = tonumber(_G.G_SpeedAdd) or 0 }, Callback = function(v)
+    _G.G_SpeedAdd = v; _G.G_translateSpeed = v
+    if _G.G_translateAccel then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        ApplyTranslateWalkSpeed(hum)
+    end
+end })
+TabMove:Toggle({ Title = "Dash Boost", Value = _G.G_DashLengthEnabled, Callback = function(v)
+    _G.G_DashLengthEnabled = v; ManageDashLength()
+end })
+TabMove:Slider({ Title = "Dash加量", Step = 1, Value = { Min = 0, Max = 200, Default = tonumber(_G.G_DashAdd) or 0 }, Callback = function(v)
+    _G.G_DashAdd = v; _G.G_DashLength = v
+    if _G.G_DashLengthEnabled then ManageDashLength() end
+end })
+TabMove:Toggle({ Title = "飞行", Value = _G.G_FlyEnabled, Callback = function(v) _G.G_FlyEnabled = v; if v then StartFly() else StopFly() end end })
+TabMove:Slider({ Title = "飞行速度", Step = 1, Value = { Min = 10, Max = 200, Default = tonumber(_G.G_FlySpeed) or 50 }, Callback = function(v) _G.G_FlySpeed = v end })
+TabMove:Toggle({ Title = "无限跳", Value = _G.G_InfJump, Callback = function(v) _G.G_InfJump = v; if v then StartInfJump() else StopInfJump() end end })
+TabMove:Toggle({ Title = "Noclip", Value = _G.G_Noclip, Callback = function(v) _G.G_Noclip = v; if v then StartNoclip() else StopNoclip() end end })
+
+-- 战斗
+TabCombat:Toggle({ Title = "免控(仅飞行时)", Desc = "必须开着飞行才生效", Value = _G.G_NoStun, Callback = function(v) _G.G_NoStun = v; if v then StartNoStun() else StopNoStun() end end })
+TabCombat:Toggle({ Title = "TP贴人 (Q)", Value = _G.G_TPEnabled, Callback = function(v) _G.G_TPEnabled = v end })
+TabCombat:Slider({ Title = "贴人距离", Step = 1, Value = { Min = 2, Max = 80, Default = tonumber(_G.G_TPDistance) or 4 }, Callback = function(v) _G.G_TPDistance = math.clamp(v, 2, 80) end })
+TabCombat:Button({ Title = "立即 TP", Callback = function() DoTPBehind() end })
+
+-- ===== 战斗：普攻 / 果实枪 / TP / V4（同类集中）=====
+TabCombat:Section({ Title = "【近战快速普攻】" })
+TabCombat:Toggle({
+    Title = "快速普攻 (RegisterAttack)",
+    Desc = "拳/刀 RegisterAttack+Hit · 人挤人同原理",
+    Value = _G.G_FastM1 == true,
+    Callback = function(v)
+        if v then StartFastM1() else StopFastM1() end
+    end
+})
+TabCombat:Dropdown({
+    Title = "普攻模式",
+    Values = {"按住左键", "自动"},
+    Value = _G.G_FastM1Mode or "按住左键",
+    Callback = function(v)
+        _G.G_FastM1Mode = v
+        if _G.G_FastM1 then StartFastM1() end
+    end
+})
+TabCombat:Slider({
+    Title = "普攻间隔×100",
+    Step = 1,
+    Value = { Min = 2, Max = 35, Default = math.floor((tonumber(_G.G_FastM1Delay) or 0.06) * 100) },
+    Callback = function(v) _G.G_FastM1Delay = math.clamp(v / 100, 0.02, 0.35) end
+})
+
+TabCombat:Section({ Title = "【果实 M1 · LeftClickRemote】" })
+TabCombat:Toggle({
+    Title = "果实 M1",
+    Desc = "Blox Fruit LeftClickRemote 朝目标方向 · 人挤人同原理",
+    Value = _G.G_FruitM1 == true,
+    Callback = function(v)
+        if v then StartFruitM1() else StopFruitM1() end
+    end
+})
+TabCombat:Slider({
+    Title = "果实M1间隔×100",
+    Step = 1,
+    Value = { Min = 5, Max = 50, Default = math.floor((tonumber(_G.G_FruitM1Delay) or 0.1) * 100) },
+    Callback = function(v) _G.G_FruitM1Delay = math.clamp(v / 100, 0.05, 0.5) end
+})
+
+TabCombat:Section({ Title = "【枪械 M1】" })
+TabCombat:Toggle({
+    Title = "枪械 M1",
+    Desc = "枪 Tool Activate + RegisterHit",
+    Value = _G.G_GunM1 == true,
+    Callback = function(v)
+        if v then StartGunM1() else StopGunM1() end
+    end
+})
+TabCombat:Slider({
+    Title = "枪械M1间隔×100",
+    Step = 1,
+    Value = { Min = 3, Max = 50, Default = math.floor((tonumber(_G.G_GunM1Delay) or 0.08) * 100) },
+    Callback = function(v) _G.G_GunM1Delay = math.clamp(v / 100, 0.03, 0.5) end
+})
+
+TabCombat:Section({ Title = "【TP 贴人】" })
+TabCombat:Toggle({
+    Title = "TP贴人 (热键Q)",
+    Desc = "必须打开才能用 Q / 立即TP",
+    Value = _G.G_TPEnabled == true,
+    Callback = function(v) _G.G_TPEnabled = v end
+})
+TabCombat:Slider({
+    Title = "贴人距离",
+    Step = 1,
+    Value = { Min = 2, Max = 80, Default = tonumber(_G.G_TPDistance) or 4 },
+    Callback = function(v) _G.G_TPDistance = math.clamp(v, 2, 80) end
+})
+TabCombat:Button({ Title = "立即 TP", Callback = function() DoTPBehind() end })
+
+TabCombat:Section({ Title = "【自动 V4 / 连招 / 闪避】" })
+TabCombat:Toggle({
+    Title = "自动 V4",
+    Desc = "Awakening Remote",
+    Value = _G.G_ForceV4 == true,
+    Callback = function(v)
+        _G.G_ForceV4 = v
+        if v then StartForceV4() else StopForceV4() end
+    end
+})
+TabCombat:Toggle({
+    Title = "自动连招 ZXC",
+    Value = _G.G_AutoCombo == true,
+    Callback = function(v)
+        _G.G_AutoCombo = v
+        if v then StartAutoCombo() else StopAutoCombo() end
+    end
+})
+TabCombat:Slider({
+    Title = "连招间隔×100",
+    Step = 1,
+    Value = { Min = 10, Max = 200, Default = math.floor((tonumber(_G.G_ComboDelay) or 0.35) * 100) },
+    Callback = function(v) _G.G_ComboDelay = v / 100 end
+})
+TabCombat:Toggle({
+    Title = "自动闪避",
+    Value = _G.G_AutoDodge == true,
+    Callback = function(v)
+        _G.G_AutoDodge = v
+        if v then StartAutoDodge() else StopAutoDodge() end
+    end
+})
+TabCombat:Toggle({
+    Title = "残血TP小怪+普攻",
+    Value = _G.G_AutoFarmM1 == true,
+    Callback = function(v)
+        if v then StartAutoFarmM1() else StopAutoFarmM1() end
+    end
+})
+TabCombat:Slider({
+    Title = "残血阈值%",
+    Step = 1,
+    Value = { Min = 5, Max = 100, Default = tonumber(_G.G_AutoFarmHP) or 30 },
+    Callback = function(v) _G.G_AutoFarmHP = v end
+})
+
+-- 辅助
+TabHelp:Toggle({ Title = "ESP", Value = _G.G_ESP, Callback = function(v) _G.G_ESP = v; if not v then ClearESP() end end })
+TabHelp:Toggle({ Title = "低血提醒", Value = _G.G_LowHPAlert, Callback = function(v) _G.G_LowHPAlert = v; if v then StartLowHP() end end })
+TabHelp:Toggle({ Title = "挂机模式", Value = _G.G_AFKMode, Callback = function(v) ApplyAFKMode(v) end })
+
+-- 目标
+
+TabTarget:Section({ Title = "目标类型" })
+TabTarget:Toggle({ Title = "瞄准玩家", Value = _G.G_SilentAimTargetPlayers, Callback = function(v) _G.G_SilentAimTargetPlayers = v end })
+TabTarget:Toggle({ Title = "瞄准 NPC/小怪", Value = _G.G_SilentAimTargetMobs ~= false, Callback = function(v) _G.G_SilentAimTargetMobs = v end })
+TabTarget:Toggle({ Title = "同队检测", Desc = "海军永不锁友军；海盗未加盟友一律可锁（本开关对海盗同队不拦截）", Value = _G.G_SilentAimTeamCheck, Callback = function(v) _G.G_SilentAimTeamCheck = v end })
+TabTarget:Toggle({ Title = "排除未开PVP", Value = _G.G_SilentAimExcludePVP, Callback = function(v) _G.G_SilentAimExcludePVP = v end })
+
+TabTarget:Section({ Title = "指定玩家（开关）" })
+TabTarget:Toggle({
+    Title = "启用指定玩家",
+    Desc = "关=FOV最近 · 开=只锁下方选中的人",
+    Value = _G.G_SelectPlayerEnabled == true,
+    Callback = function(v)
+        _G.G_SelectPlayerEnabled = v
+        if not v then
+            _G.G_SilentAimSelectedPlayer = ""
+            _G.G_SilentAimMethod = "FOV圈内"
+        else
+            _G.G_SilentAimMethod = "选择玩家"
+        end
+    end
+})
+local function BuildServerPlayerList()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            if not _G.G_SilentAimTeamCheck or IsSilentAimEnemy(p) then
+                table.insert(list, p.Name)
+            end
+        end
+    end
+    table.sort(list)
+    if #list == 0 then list = {"(无玩家)"} end
+    return list
+end
+local ServerPlayerDropdown
+ServerPlayerDropdown = TabTarget:Dropdown({
+    Title = "玩家列表（名字）",
+    Values = BuildServerPlayerList(),
+    Callback = function(v)
+        if not v or v == "(无玩家)" then return end
+        _G.G_SilentAimSelectedPlayer = v
+        _G.G_SelectPlayerEnabled = true
+        _G.G_SilentAimMethod = "选择玩家"
+        _G.G_SilentAimTargetPlayers = true
+        CombatLogAdd("targeted", v)
+        RefreshCombatLogGui()
+        print("[月食] 指定玩家:", v)
+        pcall(function() WindUI:Notify({ Title = "指定玩家", Content = v, Duration = 2 }) end)
+    end
+})
+TabTarget:Button({ Title = "刷新玩家列表", Callback = function()
+    local list = BuildServerPlayerList()
+    pcall(function()
+        if ServerPlayerDropdown and ServerPlayerDropdown.Refresh then
+            ServerPlayerDropdown:Refresh(list)
+        end
+    end)
+end })
+TabTarget:Button({ Title = "清除指定", Callback = function()
+    _G.G_SilentAimSelectedPlayer = ""
+    _G.G_SelectPlayerEnabled = false
+    _G.G_SilentAimMethod = "FOV圈内"
+    pcall(function() WindUI:Notify({ Title = "指定玩家", Content = "已清除", Duration = 2 }) end)
+end })
+
+TabTarget:Section({ Title = "记录" })
+TabTarget:Toggle({
+    Title = "显示针对/击杀小窗",
+    Value = false,
+    Callback = function(v) SetCombatLogGui(v) end
+})
+TabTarget:Button({ Title = "清空记录", Callback = function()
+    _G.G_CombatLog = { targeted = {}, killed = {} }
+    RefreshCombatLogGui()
+end })
+
+TabCfg:Paragraph({ Title = "说明", Desc = "目录 EclipseConfigs/ · 无自动保存 · 可设 Autoload" })
+local names, autoN = {}, "default"
+pcall(function()
+    names, autoN = ListConfigNames()
+end)
+if type(names) ~= "table" or #names == 0 then names = {"default"} end
+if type(autoN) ~= "string" or autoN == "" then autoN = names[1] or "default" end
+TabCfg:Paragraph({ Title = "当前 Autoload", Desc = tostring(autoN) })
+local cfgDrop
+cfgDrop = TabCfg:Dropdown({
+    Title = "选择配置",
+    Values = names,
+    Value = autoN,
+    Callback = function(v)
+        _G.__ConfigNameInput = v
+    end
+})
+TabCfg:Input({
+    Title = "新配置名称",
+    Value = "",
+    Callback = function(v)
+        if type(v) == "string" and v ~= "" then
+            _G.__ConfigNameInput = v
+        end
+    end
+})
+TabCfg:Button({ Title = "保存到所选/输入名", Callback = function()
+    local ok, clean = SaveConfigAs(_G.__ConfigNameInput or "default")
+    pcall(function()
+        WindUI:Notify({ Title = "配置", Content = ok and ("已保存: "..clean) or "保存失败", Duration = 2 })
+    end)
+    local ns = ListConfigNames()
+    pcall(function() if cfgDrop and cfgDrop.Refresh then cfgDrop:Refresh(ns) end end)
+end })
+TabCfg:Button({ Title = "加载所选配置", Callback = function()
+    local ok, clean = LoadConfigByName(_G.__ConfigNameInput or "default")
+    if ok then
+        pcall(function()
+            if _G.G_translateAccel then StartTranslateAccel(); pcall(StartSpeedHB) end
+            if _G.G_DashLengthEnabled then ManageDashLength() end
+            ApplyVisualVisibility()
+        end)
+    end
+    pcall(function()
+        WindUI:Notify({ Title = "配置", Content = ok and ("已加载: "..clean) or "加载失败", Duration = 2 })
+    end)
+end })
+TabCfg:Button({ Title = "设为 Autoload", Callback = function()
+    local n = SetAutoload(_G.__ConfigNameInput or "default")
+    pcall(function() WindUI:Notify({ Title = "Autoload", Content = n, Duration = 2 }) end)
+end })
+TabCfg:Button({ Title = "删除所选配置", Callback = function()
+    DeleteConfig(_G.__ConfigNameInput or "default")
+    local ns = ListConfigNames()
+    pcall(function() if cfgDrop and cfgDrop.Refresh then cfgDrop:Refresh(ns) end end)
+    pcall(function() WindUI:Notify({ Title = "配置", Content = "已删除(若允许)", Duration = 2 }) end)
+end })
+TabCfg:Paragraph({ Title = "热键", Desc = "月图标/RightShift · F12 · /e hide · /e show · TP=Q" })
+
+
+-- 清图
+TabMisc:Toggle({ Title = "去岩浆", Value = _G.G_RemoveLava, Callback = function(v) ApplyRemoveLava(v) end })
+TabMisc:Toggle({ Title = "去雾", Value = _G.G_RemoveFog, Callback = function(v) ApplyRemoveFog(v) end })
+TabMisc:Toggle({ Title = "去僵直动画", Value = _G.G_RemoveAnim, Callback = function(v) ApplyRemoveAnim(v) end })
+TabMisc:Toggle({ Title = "去鬼船", Value = _G.G_RemoveGhostShip, Callback = function(v) ApplyRemoveGhostShip(v) end })
+TabMisc:Toggle({ Title = "水上行走", Value = _G.G_WalkOnWater, Callback = function(v) ApplyWalkOnWater(v) end })
+TabMisc:Toggle({ Title = "解帧数限制", Desc = "需 setfpscap", Value = _G.G_UnlockFPS, Callback = function(v) ApplyUnlockFPS(v) end })
+TabMisc:Toggle({ Title = "冲刺无CD", Value = _G.G_DodgeNoCD, Callback = function(v) ApplyDodgeNoCD(v) end })
+
+-- 商店
+TabShop:Paragraph({ Title = "提示", Desc = "BF 远程常改版 · 可能完全无效 · 仅尝试" })
+TabShop:Button({ Title = "转海盗", Callback = function() ShopChangeTeam("Pirates") end })
+TabShop:Button({ Title = "转海军", Callback = function() ShopChangeTeam("Marines") end })
+TabShop:Button({ Title = "重置种族", Callback = function() ShopRerollRace() end })
+TabShop:Button({ Title = "更换吸血鬼 Ghoul", Callback = function() ShopChangeRace("Ghoul") end })
+TabShop:Button({ Title = "更换机器人 Cyborg", Callback = function() ShopChangeRace("Cyborg") end })
+
+
+
+-- 按键绑定（点击后按键捕获）
+TabKeys:Paragraph({ Title = "说明", Desc = "点「开始绑定」后按下要设置的键 · 点清除=None" })
+_G.__KeyCaptureAction = nil
+local KEY_ACTIONS = {
+    {"ToggleGUI", "开关 GUI"},
+    {"TP", "TP贴人"},
+    {"FastM1", "快速普攻"},
+    {"Speed", "速度"},
+    {"Dash", "Dash"},
+    {"Fly", "飞行"},
+    {"Noclip", "Noclip"},
+    {"InfJump", "无限跳"},
+    {"ForceV4", "自动V4"},
+    {"ESP", "ESP"},
+    {"AimSkill", "技能自瞄"},
+    {"AimM1", "M1自瞄"},
+    {"ShowFOV", "显示FOV"},
+    {"GunM1", "枪械超速M1"},
+    {"FruitM1", "果实超速M1"},
+    {"AutoCombo", "自动连招"},
+    {"AutoDodge", "自动闪避"},
+    {"NoStun", "免控"},
+}
+local keyStatusLabels = {}
+for _, pair in ipairs(KEY_ACTIONS) do
+    local id, title = pair[1], pair[2]
+    local cur = (_G.G_Keybinds and _G.G_Keybinds[id]) or "None"
+    local status = TabKeys:Paragraph({ Title = title, Desc = "当前: " .. tostring(cur) })
+    keyStatusLabels[id] = status
+    TabKeys:Button({
+        Title = "绑定 · " .. title,
+        Callback = function()
+            _G.__KeyCaptureAction = id
+            pcall(function()
+                WindUI:Notify({ Title = "按键绑定", Content = "请按下要给「" .. title .. "」的键…", Duration = 3 })
+            end)
+        end
+    })
+    TabKeys:Button({
+        Title = "清除 · " .. title,
+        Callback = function()
+            _G.G_Keybinds = _G.G_Keybinds or {}
+            _G.G_Keybinds[id] = "None"
+            pcall(function()
+                if status.SetDesc then status:SetDesc("当前: None") end
+            end)
+        end
+    })
+end
+track(UIS.InputBegan:Connect(function(input, gp)
+    if not _G.__KeyCaptureAction then return end
+    if gp or UIS:GetFocusedTextBox() then return end
+    local name = GetBindNameFromInput and GetBindNameFromInput(input) or (input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name or nil)
+    if not name then return end
+    local action = _G.__KeyCaptureAction
+    _G.__KeyCaptureAction = nil
+    _G.G_Keybinds = _G.G_Keybinds or {}
+    _G.G_Keybinds[action] = name
+    local st = keyStatusLabels[action]
+    pcall(function()
+        if st and st.SetDesc then st:SetDesc("当前: " .. name) end
+        local W = rawget(_G, "WindUI") or WindUI
+        if W and W.Notify then W:Notify({ Title = "已绑定", Content = action .. " = " .. name, Duration = 2 }) end
+    end)
+    print("[月食] 绑定", action, name)
+end))
+TabKeys:Slider({
+    Title = "枪械M1间隔×1000",
+    Step = 1,
+    Value = { Min = 10, Max = 200, Default = math.floor((tonumber(_G.G_GunM1Delay) or 0.03) * 1000) },
+    Callback = function(v) _G.G_GunM1Delay = math.clamp(v / 1000, 0.01, 0.2) end
+})
+TabKeys:Slider({
+    Title = "果实M1间隔×1000",
+    Step = 1,
+    Value = { Min = 10, Max = 200, Default = math.floor((tonumber(_G.G_FruitM1Delay) or 0.03) * 1000) },
+    Callback = function(v) _G.G_FruitM1Delay = math.clamp(v / 1000, 0.01, 0.2) end
+})
+
+
+
+-- ===== 宏：闪步接技能 / 连闪 / 序列（全部带开关）=====
+TabMacro:Section({ Title = "【闪步后接技能】必须打开开关才生效" })
+TabMacro:Toggle({
+    Title = "启用：闪步后接技能",
+    Desc = "打开后：按 R 闪步 → 自动放下面选的技能",
+    Value = _G.G_SoruSkillEnabled == true,
+    Callback = function(v)
+        _G.G_SoruSkillEnabled = v
+        pcall(function()
+            WindUI:Notify({ Title = "闪步接技能", Content = v and "已开启：按R后自动技能" or "已关闭", Duration = 2 })
+        end)
+    end
+})
+TabMacro:Dropdown({
+    Title = "闪后放哪个技能",
+    Values = {"Z", "X", "C", "V", "F"},
+    Value = _G.G_SoruSkillKey or "X",
+    Callback = function(v) _G.G_SoruSkillKey = v end
+})
+TabMacro:Input({
+    Title = "闪后序列(可选,如 Z,X 优先于单键)",
+    Value = tostring(_G.G_SoruSkillSeq or ""),
+    Callback = function(v)
+        if type(v) == "string" then _G.G_SoruSkillSeq = v end
+    end
+})
+TabMacro:Slider({
+    Title = "闪后延迟 ms",
+    Step = 10,
+    Value = { Min = 0, Max = 500, Default = math.floor((tonumber(_G.G_SoruSkillDelay) or 0.08) * 1000) },
+    Callback = function(v) _G.G_SoruSkillDelay = math.clamp(v / 1000, 0, 0.5) end
+})
+TabMacro:Toggle({
+    Title = "闪后技能走静默自瞄",
+    Value = _G.G_SoruBindAim ~= false,
+    Callback = function(v) _G.G_SoruBindAim = v end
+})
+TabMacro:Button({
+    Title = "测试：一键闪步朝目标+技能",
+    Callback = function()
+        pcall(SoruTowardTargetThenSkill)
+    end
+})
+
+TabMacro:Section({ Title = "【连闪 R】" })
+TabMacro:Toggle({
+    Title = "启用：连闪",
+    Desc = "打开后按住下方热键狂按 R",
+    Value = _G.G_SoruSpamEnabled == true,
+    Callback = function(v)
+        _G.G_SoruSpamEnabled = v
+        if not v then pcall(StopSoruSpamLoop) end
+    end
+})
+TabMacro:Input({
+    Title = "连闪热键(默认T)",
+    Value = tostring(_G.G_SoruSpamKey or "T"),
+    Callback = function(v)
+        if type(v) == "string" and v ~= "" then _G.G_SoruSpamKey = v:upper() end
+    end
+})
+TabMacro:Slider({
+    Title = "连闪间隔 ms",
+    Step = 5,
+    Value = { Min = 20, Max = 300, Default = math.floor((tonumber(_G.G_SoruSpamInterval) or 0.05) * 1000) },
+    Callback = function(v) _G.G_SoruSpamInterval = math.clamp(v / 1000, 0.02, 0.3) end
+})
+
+TabMacro:Section({ Title = "【普通按键序列宏】" })
+TabMacro:Paragraph({ Title = "说明", Desc = "进程内模拟按键 · 不是外部AHK" })
+TabMacro:Input({
+    Title = "序列 (如 Z,X,C)",
+    Value = tostring(_G.G_MacroSequence or "Z,X,C"),
+    Callback = function(v)
+        if type(v) == "string" and v ~= "" then _G.G_MacroSequence = v end
+    end
+})
+TabMacro:Slider({
+    Title = "序列键间隔×100",
+    Step = 1,
+    Value = { Min = 5, Max = 200, Default = math.floor((tonumber(_G.G_MacroDelay) or 0.25) * 100) },
+    Callback = function(v) _G.G_MacroDelay = math.clamp(v / 100, 0.05, 2) end
+})
+TabMacro:Toggle({
+    Title = "循环序列宏",
+    Value = _G.G_MacroLoop == true,
+    Callback = function(v) _G.G_MacroLoop = v end
+})
+TabMacro:Button({ Title = "执行序列 / 开始循环", Callback = function() StartMacro() end })
+TabMacro:Button({ Title = "停止序列宏", Callback = function() StopMacro() end })
+
+-- 服务器
+TabServer:Button({ Title = "重进当前服", Callback = function() ServerRejoin() end })
+TabServer:Button({ Title = "跳服(低人数优先)", Callback = function() ServerHop() end })
+TabServer:Paragraph({ Title = "说明", Desc = "跳服需 executor 支持 request/HttpGet" })
+
+-- 启动恢复
+
+if _G.G_translateAccel then StartTranslateAccel(); pcall(StartSpeedHB) end
+if _G.G_DashLengthEnabled then ManageDashLength() end
+if _G.G_FlyEnabled then StartFly() end
+if _G.G_NoStun then StartNoStun() end
+if _G.G_FastM1 then StartFastM1() end
+if _G.G_ForceV4 then StartForceV4() end
+if _G.G_AutoCombo then StartAutoCombo() end
+if _G.G_AutoDodge then StartAutoDodge() end
+if _G.G_InfJump then StartInfJump() end
+if _G.G_Noclip then StartNoclip() end
+if _G.G_LowHPAlert then StartLowHP() end
+
+pcall(function() Window:Open() end)
+print("[月食自瞄 by ECLIPSE] 真 WindUI · RightShift 开关 · 全功能")
+
+
+
+
+-- ESP 绘制
+local ESPRenderConn
+ESPDrawings = ESPDrawings or {}
+if type(ESPDrawings) ~= "table" then ESPDrawings = {} end
+local function EnsureESPLoop()
+    if ESPRenderConn then return end
+    ESPRenderConn = RunService.RenderStepped:Connect(function()
+        if not ScriptAlive or not _G.G_ESP then
+            pcall(ClearESP)
+            return
+        end
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+        local seen = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                if hrp and hum and hum.Health > 0 then
+                    local pos, on = cam:WorldToViewportPoint(hrp.Position)
+                    local key = plr.Name
+                    seen[key] = true
+                    local d = ESPDrawings[key]
+                    if not d then
+                        d = {}
+                        pcall(function()
+                            local t = Drawing.new("Text")
+                            t.Size = 14; t.Center = true; t.Outline = true
+                            t.Color = Color3.fromRGB(255, 80, 80)
+                            d.text = t
+                        end)
+                        ESPDrawings[key] = d
+                    end
+                    if d.text then
+                        if on and pos.Z > 0 then
+                            d.text.Visible = true
+                            d.text.Position = Vector2.new(pos.X, pos.Y - 20)
+                            d.text.Text = string.format("%s [%.0f]", plr.Name, hum.Health)
+                        else
+                            d.text.Visible = false
+                        end
+                    end
+                end
+            end
+        end
+        for k, d in pairs(ESPDrawings) do
+            if not seen[k] then
+                pcall(function() if d.text then d.text:Remove() end end)
+                ESPDrawings[k] = nil
+            end
+        end
+    end)
+    pcall(function() if track then track(ESPRenderConn) end end)
+end
+local _oldESPFlag = false
+track(RunService.Heartbeat:Connect(function()
+    if _G.G_ESP and not _oldESPFlag then EnsureESPLoop() end
+    _oldESPFlag = _G.G_ESP == true
+end))
+
+-- ========== 补全缺失功能实现 ==========
+ESPDrawings = ESPDrawings or {}
+if type(ClearESP) ~= "function" then
+    function ClearESP()
+        ESPDrawings = ESPDrawings or {}
+        for k, d in pairs(ESPDrawings) do
+            pcall(function()
+                if typeof(d) == "Instance" and d.Destroy then d:Destroy()
+                elseif type(d) == "table" then
+                    for _, x in pairs(d) do pcall(function() if x.Remove then x:Remove() elseif x.Destroy then x:Destroy() end end) end
+                elseif d and d.Remove then d:Remove()
+                end
+            end)
+            ESPDrawings[k] = nil
+        end
+    end
+end
+if type(StartInfJump) ~= "function" then
+    local infConn
+    function StartInfJump()
+        _G.G_InfJump = true
+        if infConn then return end
+        infConn = UIS.JumpRequest:Connect(function()
+            if not ScriptAlive or not _G.G_InfJump then return end
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end) end
+        end)
+        pcall(function() if track then track(infConn) end end)
+        print("[月食] 无限跳 ON")
+    end
+    function StopInfJump()
+        _G.G_InfJump = false
+        if infConn then pcall(function() infConn:Disconnect() end); infConn = nil end
+        print("[月食] 无限跳 OFF")
+    end
+end
+if type(StartNoclip) ~= "function" then
+    local ncConn
+    function StartNoclip()
+        _G.G_Noclip = true
+        if ncConn then pcall(function() ncConn:Disconnect() end); ncConn = nil end
+        ncConn = RunService.Stepped:Connect(function()
+            if not ScriptAlive or not _G.G_Noclip then return end
+            local char = LocalPlayer.Character
+            if not char then return end
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
+            end
+            -- 也关角色碰撞组
+            pcall(function()
+                for _, p in ipairs(char:GetChildren()) do
+                    if p:IsA("BasePart") then p.CanCollide = false end
+                end
+            end)
+        end)
+        pcall(function() if track then track(ncConn) end end)
+        print("[月食] Noclip ON")
+    end
+    function StopNoclip()
+        _G.G_Noclip = false
+        if ncConn then pcall(function() ncConn:Disconnect() end); ncConn = nil end
+        print("[月食] Noclip OFF")
+    end
+end
+if type(StartAutoCombo) ~= "function" then
+    local acTask
+    function StartAutoCombo()
+        _G.G_AutoCombo = true
+        if acTask then return end
+        acTask = task.spawn(function()
+            while ScriptAlive and _G.G_AutoCombo do
+                local seq = tostring(_G.G_MacroSequence or _G.G_ComboSeq or "Z,X,C")
+                local delay = math.clamp(tonumber(_G.G_ComboDelay) or 0.25, 0.05, 2)
+                for part in string.gmatch(seq, "[^,]+") do
+                    if not _G.G_AutoCombo then break end
+                    local k = part:gsub("%s+",""):upper()
+                    if k ~= "" then
+                        pcall(function()
+                            local vim = game:GetService("VirtualInputManager")
+                            local kc = Enum.KeyCode[k]
+                            if kc then
+                                vim:SendKeyEvent(true, kc, false, game)
+                                task.wait(0.04)
+                                vim:SendKeyEvent(false, kc, false, game)
+                            end
+                        end)
+                        task.wait(delay)
+                    end
+                end
+                task.wait(0.05)
+            end
+            acTask = nil
+        end)
+        print("[月食] 自动连招 ON")
+    end
+    function StopAutoCombo()
+        _G.G_AutoCombo = false
+        acTask = nil
+        print("[月食] 自动连招 OFF")
+    end
+end
+if type(StartAutoDodge) ~= "function" then
+    function StartAutoDodge()
+        _G.G_AutoDodge = true
+        print("[月食] 自动闪避 ON（轻量）")
+    end
+    function StopAutoDodge()
+        _G.G_AutoDodge = false
+        print("[月食] 自动闪避 OFF")
+    end
+end
+if type(StartLowHP) ~= "function" then
+    local lowConn
+    function StartLowHP()
+        _G.G_LowHPAlert = true
+        if lowConn then return end
+        lowConn = RunService.Heartbeat:Connect(function()
+            if not ScriptAlive or not _G.G_LowHPAlert then return end
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and hum.Health < (hum.MaxHealth * 0.35) then
+                if not _G.__LowHPSaid or tick() - _G.__LowHPSaid > 5 then
+                    _G.__LowHPSaid = tick()
+                    print("[月食] 低血量警告!", math.floor(hum.Health))
+                end
+            end
+        end)
+        pcall(function() if track then track(lowConn) end end)
+    end
+    function StopLowHP()
+        _G.G_LowHPAlert = false
+        if lowConn then pcall(function() lowConn:Disconnect() end); lowConn = nil end
+    end
+end
+if type(StartAutoFarmM1) ~= "function" then
+    function StartAutoFarmM1() _G.G_AutoFarmM1 = true; print("[月食] AutoFarmM1 ON") end
+    function StopAutoFarmM1() _G.G_AutoFarmM1 = false end
+end
+if type(ApplyAFKMode) ~= "function" then
+    function ApplyAFKMode(on)
+        _G.G_AFKMode = on and true or false
+        if on then
+            -- 关显眼功能，留速度
+            _G.G_FlyEnabled = false
+            pcall(function() if StopFly then StopFly() end end)
+            _G.G_ESP = false
+            pcall(function() if ClearESP then ClearESP() end end)
+            _G.G_SilentAimShowFOV = false
+            pcall(function() if ApplyVisualVisibility then ApplyVisualVisibility() end end)
+            print("[月食] 挂机模式 ON")
+        else
+            print("[月食] 挂机模式 OFF")
+        end
+    end
+end
+if type(StopGunM1) ~= "function" then function StopGunM1() _G.G_GunM1 = false end end
+if type(StopFruitM1) ~= "function" then function StopFruitM1() _G.G_FruitM1 = false end end
+if type(StopForceV4) ~= "function" then function StopForceV4() _G.G_ForceV4 = false end end
+if type(StopNoStun) ~= "function" then function StopNoStun() _G.G_NoStun = false end end
+if type(StopSpeedHB) ~= "function" then
+    function StopSpeedHB()
+        if type(speedHB) ~= "nil" then pcall(function() speedHB:Disconnect() end) end
+    end
+end
+if type(StopTranslateAccel) ~= "function" then
+    function StopTranslateAccel()
+        _G.G_translateAccel = false
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then pcall(function() hum.WalkSpeed = 16 end) end
+    end
+end
+if type(StopFastM1) ~= "function" and type(StartFastM1) == "function" then
+    -- StartFastM1 may set flag; ensure stop exists
+end
+print("[月食] 缺失功能已补全")
+
+
+-- 强制强力 Noclip（覆盖空壳）
+do
+    local ncConn
+    function StartNoclip()
+        _G.G_Noclip = true
+        if ncConn then pcall(function() ncConn:Disconnect() end) end
+        ncConn = RunService.Stepped:Connect(function()
+            if not _G.G_Noclip or not ScriptAlive then return end
+            local char = LocalPlayer.Character
+            if not char then return end
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then p.CanCollide = false end
+            end
+        end)
+        if track then pcall(track, ncConn) end
+        print("[月食] Noclip ON")
+    end
+    function StopNoclip()
+        _G.G_Noclip = false
+        if ncConn then pcall(function() ncConn:Disconnect() end); ncConn = nil end
+        print("[月食] Noclip OFF")
+    end
+    _G.__Eclipse = _G.__Eclipse or {}
+    _G.__Eclipse.StartNoclip = StartNoclip
+    _G.__Eclipse.StopNoclip = StopNoclip
+end
+
+do
+    _G.__Eclipse = _G.__Eclipse or {}
+    local E = _G.__Eclipse
+    local function set(n,f) if type(f)=="function" then E[n]=f end end
+    set("StartFly", StartFly); set("StopFly", StopFly)
+    set("StartFastM1", StartFastM1); set("StopFastM1", StopFastM1)
+    set("StartTranslateAccel", StartTranslateAccel); set("StopTranslateAccel", StopTranslateAccel)
+    set("StartSpeedHB", StartSpeedHB); set("StopSpeedHB", StopSpeedHB)
+    set("ManageDashLength", ManageDashLength)
+    set("StartNoclip", StartNoclip); set("StopNoclip", StopNoclip)
+    set("StartInfJump", StartInfJump); set("StopInfJump", StopInfJump)
+    set("StartForceV4", StartForceV4); set("StopForceV4", StopForceV4)
+    set("StartNoStun", StartNoStun); set("StopNoStun", StopNoStun)
+    set("StartAutoCombo", StartAutoCombo); set("StopAutoCombo", StopAutoCombo)
+    set("StartAutoDodge", StartAutoDodge); set("StopAutoDodge", StopAutoDodge)
+    set("StartGunM1", StartGunM1); set("StopGunM1", StopGunM1)
+    set("StartFruitM1", StartFruitM1); set("StopFruitM1", StopFruitM1)
+    set("ClearESP", ClearESP); set("ApplyVisualVisibility", ApplyVisualVisibility)
+    set("DoTPBehind", DoTPBehind); set("DoAHKCycle", DoAHKCycle); set("ResetAHKCycle", ResetAHKCycle)
+    if MainWindow then E.MainWindow = MainWindow end
+    if Window then E.MainWindow = Window; MainWindow = Window end
+    pcall(RegisterKeybindActions)
+    print("[月食] 全功能 API 已导出 · 热键已重注册")
+end
+
+
+
+-- ========== 强力 Noclip（最终覆盖）==========
+do
+    local ncStepped, ncHeartbeat
+    local function setCharNoCollide(char)
+        if not char then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then
+                pcall(function()
+                    p.CanCollide = false
+                    p.CanTouch = p.CanTouch -- keep
+                end)
+            end
+        end
+    end
+    function StartNoclip()
+        _G.G_Noclip = true
+        if ncStepped then pcall(function() ncStepped:Disconnect() end) end
+        if ncHeartbeat then pcall(function() ncHeartbeat:Disconnect() end) end
+        -- Stepped：物理前关碰撞
+        ncStepped = RunService.Stepped:Connect(function()
+            if not ScriptAlive or not _G.G_Noclip then return end
+            setCharNoCollide(LocalPlayer.Character)
+        end)
+        -- Heartbeat：再刷一次，防游戏回写
+        ncHeartbeat = RunService.Heartbeat:Connect(function()
+            if not ScriptAlive or not _G.G_Noclip then return end
+            setCharNoCollide(LocalPlayer.Character)
+        end)
+        if track then
+            pcall(track, ncStepped)
+            pcall(track, ncHeartbeat)
+        end
+        -- 角色重生后继续
+        pcall(function()
+            if LocalPlayer.Character then setCharNoCollide(LocalPlayer.Character) end
+        end)
+        print("[月食] Noclip ON")
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Noclip", Content = "已开启", Duration = 2 })
+            end
+        end)
+    end
+    function StopNoclip()
+        _G.G_Noclip = false
+        if ncStepped then pcall(function() ncStepped:Disconnect() end); ncStepped = nil end
+        if ncHeartbeat then pcall(function() ncHeartbeat:Disconnect() end); ncHeartbeat = nil end
+        print("[月食] Noclip OFF")
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Noclip", Content = "已关闭", Duration = 2 })
+            end
+        end)
+    end
+    _G.__Eclipse = _G.__Eclipse or {}
+    _G.__Eclipse.StartNoclip = StartNoclip
+    _G.__Eclipse.StopNoclip = StopNoclip
+end
+
